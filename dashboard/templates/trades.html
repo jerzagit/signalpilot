@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}SignalPilot · Trades{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Trades</h1>
+  <p>Latest realized closes mirrored from MT5 (profit = P&amp;L + swap + commission + fee).</p>
+</div>
+
+<div class="kpis">
+  <div class="kpi gold">
+    <div class="card-title">Total realized</div>
+    <div class="card-value {% if total_pnl >= 0 %}text-success{% else %}text-danger{% endif %}" id="kpi-pnl">${{ "{:,.2f}".format(total_pnl) }}</div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-wrap">
+    <table class="portal-table">
+      <thead>
+        <tr>
+          <th>Time</th><th>Symbol</th><th>Tag</th><th>Side</th><th>Lots</th>
+          <th>Price</th><th class="text-right">P&amp;L</th>
+        </tr>
+      </thead>
+      <tbody id="trades-body">
+        <tr><td colspan="7" class="text-muted">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function fmtTs(ts) {
+    const d = new Date(ts * 1000);
+    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  }
+  fetch('/api/trades?limit=100', { cache: 'no-cache' })
+    .then(r => r.json())
+    .then(rows => {
+      const body = document.getElementById('trades-body');
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="text-muted">No closed trades yet.</td></tr>';
+        return;
+      }
+      body.innerHTML = rows.map(r => {
+        const cls = r.pnl > 0 ? 'text-success' : (r.pnl < 0 ? 'text-danger' : 'text-muted');
+        const side = (r.direction || '').toUpperCase();
+        return `<tr>
+          <td>${fmtTs(r.ts)}</td>
+          <td>${r.symbol}</td>
+          <td><span class="badge ${side === 'BUY' ? 'buy' : 'sell'}">${r.tag || '—'}</span></td>
+          <td><span class="badge ${side === 'BUY' ? 'buy' : 'sell'}">${side}</span></td>
+          <td>${Number(r.volume || 0).toFixed(2)}</td>
+          <td class="font-mono">${Number(r.price || 0).toFixed(2)}</td>
+          <td class="font-mono ${cls}">${r.pnl > 0 ? '+' : ''}${r.pnl.toFixed(2)}</td>
+        </tr>`;
+      }).join('');
+    });
+</script>
+{% endblock %}

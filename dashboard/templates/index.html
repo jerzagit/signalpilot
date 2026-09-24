@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}SignalPilot · {{ view.month_name }} {{ view.year }}{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block content %}
+<div class="page-header">
+  <h1>Calendar — {{ view.month_name }} <em>{{ view.year }}</em></h1>
+  <p>Realized profit per day plus account balance growth. Data comes from the
+  on-disk MT5 deal mirror — no terminal needed.</p>
+</div>
+
+<div class="kpis">
+  <div class="kpi gold">
+    <div class="card-title">Balance now</div>
+    <div class="card-value" id="kpi-balance">${{ "{:,.2f}".format(last_balance) }}</div>
+    <div class="sig-chip">baseline ${{ "{:,.2f}".format(chart.baseline) }}</div>
+  </div>
+  <div class="kpi">
+    <div class="card-title">Total profit (bot)</div>
+    <div class="card-value {% if total_pnl >= 0 %}text-success{% else %}text-danger{% endif %}" id="kpi-pnl">${{ "{:,.2f}".format(total_pnl) }}</div>
+    <div class="sig-chip">all time, realized</div>
+  </div>
+  <div class="kpi">
+    <div class="card-title">Month {{ view.month_name }}</div>
+    <div class="card-value {% if view.month_pnl >= 0 %}text-success{% else %}text-danger{% endif %}">${{ "{:,.2f}".format(view.month_pnl) }}</div>
+    <div class="sig-chip">{{ view.num_trading_days }} trading day(s) · {{ view.signals_count }} signal(s)</div>
+  </div>
+  <div class="kpi">
+    <div class="card-title">Win rate</div>
+    <div class="card-value">{{ "{:.1f}".format(win_rate) }}%</div>
+    <div class="sig-chip">{{ stats.wins }} W · {{ stats.losses }} L · {{ stats.deals }} closes</div>
+  </div>
+</div>
+
+<div class="card card-pad">
+  <div class="cal-head">
+    <a class="btn btn-secondary btn-sm" href="/?year={{ view.prev[0] }}&month={{ view.prev[1] }}">← {{ view.prev[1] | pycal_month_name }}</a>
+    <div class="cal-title">{{ view.month_name }} <em>{{ view.year }}</em></div>
+    <a class="btn btn-secondary btn-sm" href="/?year={{ view.next[0] }}&month={{ view.next[1] }}">{{ view.next[1] | pycal_month_name }} →</a>
+  </div>
+
+  <div class="cal-weekdays">
+    <div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div>
+    <div>Sat</div><div>Sun</div>
+  </div>
+
+  <div class="cal-grid">
+    {% for c in view.cells %}
+      {% if c.dim %}
+        <div class="cal-cell dim"></div>
+      {% else %}
+        <div class="cal-cell {% if c.trading %}trading{% endif %}">
+          <div class="cal-day">
+            {% if c.today %}<span class="cal-day today">{{ c.day }}</span>{% else %}<span>{{ c.day }}</span>{% endif %}
+            {% if c.balance is not none %}<span class="cal-pnl {% if c.pnl > 0 %}pos{% elif c.pnl < 0 %}neg{% else %}flat{% endif %}">{{ "%+.2f"|format(c.pnl) }}</span>{% endif %}
+          </div>
+          {% if c.balance is not none %}
+            <div class="cal-eq">Eq <strong>${{ "{:,.2f}".format(c.balance) }}</strong></div>
+            {% for s in c.sigs %}
+              <div class="sig-chip">
+                <span class="badge {% if s.direction == 'buy' %}buy{% else %}sell{% endif %}">{{ s.direction }}</span>
+                <span>{{ s.signal_id }}</span>
+              </div>
+            {% endfor %}
+          {% endif %}
+        </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+
+  <div class="cal-legend">
+    <span><span class="dot pnl"></span> day with realized P&amp;L</span>
+    <span><span class="dot pos"></span> positive day</span>
+    <span><span class="dot neg"></span> negative day</span>
+  </div>
+</div>
+
+<div class="card card-pad" style="margin-top:22px;">
+  <div class="card-title">Account growth — balance after each closed day</div>
+  <div class="chart-box"><canvas id="growthChart"></canvas></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const chartData = {{ chart | tojson }};
+  (function () {
+    const labels = chartData.labels || [];
+    const values = chartData.values || [];
+    if (!values.length) {
+      document.getElementById('growthChart').parentElement.innerHTML =
+        '<p class="text-muted" style="padding:60px 0;text-align:center;">No closed trades yet — the curve appears once the first day closes.</p>';
+      return;
+    }
+    const ctx = document.getElementById('growthChart').getContext('2d');
+    const g = ctx.createLinearGradient(0, 0, 0, 300);
+    g.addColorStop(0, 'rgba(212, 175, 55, 0.28)');
+    g.addColorStop(1, 'rgba(212, 175, 55, 0)');
+    new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Balance',
+          data: values,
+          borderColor: '#C9A227',
+          backgroundColor: g,
+          fill: true,
+          tension: .25,
+          pointRadius: 2,
+          pointBackgroundColor: '#C9A227'
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: c => '$' + Number(c.parsed.y).toLocaleString(undefined, {minimumFractionDigits: 2}) } }
+        },
+        scales: {
+          y: {
+            grid: { color: '#F1F2F4' },
+            ticks: { callback: v => '$' + v.toLocaleString() }
+          },
+          x: { grid: { display: false } }
+        }
+      }
+    });
+  })();
+
+  fetch('/api/account', { cache: 'no-cache' })
+    .then(r => r.json())
+    .then(d => {
+      if (!d) return;
+      const el = document.getElementById('kpi-balance');
+      if (!d.stale) {
+        el.textContent = '$' + Number(d.balance).toLocaleString(undefined, {minimumFractionDigits: 2});
+        if (d.equity != null) el.title = 'Equity $' + Number(d.equity).toLocaleString(undefined, {minimumFractionDigits: 2});
+      }
+    });
+</script>
+{% endblock %}

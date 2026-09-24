@@ -29,10 +29,12 @@ from pathlib import Path
 import MetaTrader5 as mt5
 
 from core.config import (
+    ACCOUNT_BASELINE,
     AUTO_LOT_SIZE,
     AUTOTRADE_ENABLED,
     BE_PIPS,
     BE_POLL_SECS,
+    DB_SYNC_ENABLED,
     MT5_ACCOUNT,
     MT5_LOGIN,
     MT5_PASSWORD,
@@ -42,6 +44,7 @@ from core.config import (
     PIP_SIZE,
     RISK_PERCENT,
 )
+from core.db import mark_signal_done, record_signal, sync_from_mt5
 from core.forwarder import notify_admin
 from core.signal import FollowUpAlert, Signal
 
@@ -236,6 +239,22 @@ def _close_target(symbol: str, n_tickets: int) -> tuple[float, int]:
     return closed, count
 
 
+def _sync_db(state: dict) -> None:
+    """Mirror the latest MT5 deals into the SQLite calendar store."""
+    if not DB_SYNC_ENABLED:
+        return
+    try:
+        ticket_to_tag = {}
+        for trade in state.values():
+            for t in _trade_tickets(trade):
+                ticket_to_tag[int(t)] = trade["tag"]
+            if trade.get("ticket"):
+                ticket_to_tag[int(trade["ticket"])] = trade["tag"]
+        sync_from_mt5(mt5, MAGIC, ticket_to_tag)
+    except Exception as exc:
+        log.error("AUTOTRADE: db sync failed: %s", exc)
+
+
 def open_for_signal(signal: Signal, source_id: str, raw: str) -> str:
     """Open the signal as 0.01-lot layers. Returns a human summary."""
     if not AUTOTRADE_ENABLED:
@@ -334,6 +353,17 @@ def open_for_signal(signal: Signal, source_id: str, raw: str) -> str:
         "done": False,
     }
     _save(state)
+    record_signal(
+        tag,
+        signal.symbol,
+        side,
+        float(signal.entry_low),
+        sl_price,
+        [float(t) for t in signal.tps],
+        len(tickets),
+        received_at=getattr(signal, "received_at", None) or int(time.time()),
+    )
+    _sync_db(state)
     summary = (
         f"AUTO opened {side.upper()} {signal.symbol} ({mtsym}) "
         f"{len(tickets)}x{AUTO_LOT_SIZE:g} = {volume0:g} lots "
@@ -401,6 +431,9 @@ def _manage(state: dict, key: str, trade: dict, followup: FollowUpAlert) -> str:
     else:
         log.info("AUTOTRADE [%s]: %s", key, reason)
     _save(state)
+    _sync_db(state)
+    if trade.get("done"):
+        mark_signal_done(trade.get("tag") or key.split(":", 1)[-1])
     return reason
 
 
@@ -485,6 +518,7 @@ def _monitor_prices() -> None:
             trade["done"] = True
             trade["reason"] = "closed (external TP/SL)"
             changed = True
+            mark_signal_done(trade.get("tag") or key.split(":", 1)[-1])
             continue
         tick = _tick(symbol)
         if not tick:
@@ -496,6 +530,7 @@ def _monitor_prices() -> None:
             changed = True
     if changed:
         _save(state)
+    _sync_db(state)
 
 
 async def run_manager_loop() -> None:

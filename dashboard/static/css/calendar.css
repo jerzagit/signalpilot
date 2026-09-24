@@ -1,0 +1,153 @@
+/* SignalPilot Calendar — additions on top of portal.css (botsignal theme) */
+
+/* ── Calendar grid ────────────────────────────────────── */
+
+.cal-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.cal-title { font-weight: 700; font-size: 1.15rem; color: var(--text-title); }
+.cal-title em { font-style: normal; color: var(--gold-primary); }
+
+.cal-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cal-weekdays,
+.cal-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.cal-weekdays {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 8px;
+}
+
+.cal-weekdays div { text-align: center; padding: 4px 0; }
+
+.cal-cell {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: #fff;
+  padding: 10px 10px 12px;
+  min-height: 92px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  transition: transform var(--transition), box-shadow var(--transition);
+  position: relative;
+  overflow: hidden;
+}
+
+.cal-cell.trading {
+  border-color: #F0D78A;
+  box-shadow: var(--shadow-card);
+}
+
+.cal-cell.trading:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-elevated);
+}
+
+.cal-cell.dim { background: transparent; border-style: dashed; border-color: var(--border-soft); min-height: 92px; }
+
+.cal-day {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.cal-day.today {
+  width: 24px;
+  height: 24px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--gold-primary), var(--gold-bright));
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cal-pnl {
+  font-weight: 700;
+  font-size: 0.95rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.cal-pnl.pos { color: var(--success); }
+.cal-pnl.neg { color: var(--danger); }
+.cal-pnl.flat { color: var(--text-muted); }
+
+.cal-eq {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-top: auto;
+}
+
+.cal-eq strong { color: var(--text-title); font-weight: 600; }
+
+.cal-legend {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.cal-legend .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+.cal-legend .dot.pos { background: var(--success); }
+.cal-legend .dot.neg { background: var(--danger); }
+.cal-legend .dot.pnl { border: 1px dashed #D0D5DD; border-radius: 4px; width: 10px; height: 10px; display: inline-block; margin-right: 5px; }
+
+.chart-box { position: relative; height: 300px; }
+
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 22px; }
+
+.kpi {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-card);
+}
+
+.kpi .card-title { margin: 0 0 6px; }
+
+.kpi .card-value { font-size: 1.3rem; }
+
+.kpi.gold {
+  background: linear-gradient(135deg, #FFFFFF 0%, #FFF5D6 100%);
+  border-color: #F0E0A8;
+}
+
+.sig-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  font-size: 0.74rem;
+  color: var(--text-secondary);
+}
+
+@media (max-width: 640px) {
+  .cal-cell { min-height: 74px; padding: 8px; }
+  .cal-pnl { font-size: 0.82rem; }
+}

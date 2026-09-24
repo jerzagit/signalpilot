@@ -99,6 +99,14 @@ MT5_SYMBOL_MAP = {
     for k, v in [pair.split("=", 1)]
 }
 
+# Account balance right before the first auto-traded signal — baseline for the
+# dashboard's equity curve (sum of realized P&L is stacked on top of this).
+ACCOUNT_BASELINE = float(os.getenv("ACCOUNT_BASELINE", "1416.55"))
+# Keep the on-disk MT5 deal mirror (core/db.py) in sync as trades happen.
+DB_SYNC_ENABLED = os.getenv("DB_SYNC_ENABLED", "true").lower() in {
+    "1", "true", "yes", "on",
+}
+
 
 @dataclass(frozen=True)
 class SignalSource:
