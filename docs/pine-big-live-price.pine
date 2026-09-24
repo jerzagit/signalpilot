@@ -1,0 +1,38 @@
+//@version=6
+indicator("Big Live Price", overlay=true)
+
+// Large price display — middle middle_right
+var table t = table.new(
+     position.middle_right,
+     1,
+     1,
+     border_width = 0
+)
+
+// Current price horizontal line
+var line pl = line.new(
+     bar_index,
+     close,
+     bar_index + 1,
+     close,
+     extend = extend.both,
+     color = color.orange,
+     width = 2,
+     style = line.style_dashed
+)
+
+if barstate.islast
+    // Update current price line
+    line.set_xy1(pl, bar_index - 1, close)
+    line.set_xy2(pl, bar_index, close)
+
+    // Update large price label
+    table.cell(
+         t,
+         0,
+         0,
+         str.tostring(close, format.mintick),
+         text_size = size.huge,
+         text_color = color.orange,
+         bgcolor = color.new(color.black, 20)
+    )

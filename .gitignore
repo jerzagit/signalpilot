@@ -1,0 +1,25 @@
+# Secrets — NEVER commit these
+.env
+data/session*
+data/session
+
+# Telethon session move/sync scratch
+*.session
+
+# Logs and runtime state
+logs/
+
+# Runtime data (sessions, trade state, caches, cards, screenshots)
+data/
+
+# Python
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editors / tooling
+.vscode/
+.idea/

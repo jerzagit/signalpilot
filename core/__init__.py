@@ -1,0 +1,1 @@
+"""SignalPilotV1 — Telegram signal ingestion and channel forwarding."""
