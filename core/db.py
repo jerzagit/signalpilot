@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS signals (
     sl          REAL,
     tps         TEXT,
     layers      INTEGER,
-    status      TEXT DEFAULT 'open'
+    status      TEXT DEFAULT 'open',
+    exit        TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS trades (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -63,6 +64,9 @@ def get_conn() -> sqlite3.Connection:
 def init_db() -> None:
     with get_conn() as conn:
         conn.executescript(_SCHEMA)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(signals)")}
+        if "exit" not in cols:
+            conn.execute("ALTER TABLE signals ADD COLUMN exit TEXT DEFAULT ''")
 
 
 def _meta_get(conn, key: str) -> str | None:
@@ -111,6 +115,15 @@ def mark_signal_done(signal_id: str) -> None:
     with get_conn() as conn:
         conn.execute(
             "UPDATE signals SET status='done' WHERE signal_id = ?", (signal_id,)
+        )
+
+
+def mark_signal_exit(signal_id: str, exit_label: str) -> None:
+    """Record how a signal finished (TP1/TP2/TP3/SL/MAN/EXT) and close it."""
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE signals SET status='done', exit=? WHERE signal_id = ?",
+            (exit_label, signal_id),
         )
 
 
@@ -167,6 +180,139 @@ def sync_from_mt5(mt5_module, magic: int, ticket_to_tag: dict[int, str] | None =
 
 def realized(p: sqlite3.Row) -> float:
     return float(p["profit"] or 0) + float(p["swap"] or 0) + float(p["commission"] or 0) + float(p["fee"] or 0)
+
+
+def close_level(price: float, tps: list[float], sl: float | None, direction: str) -> str:
+    """Which exit a close price maps to: highest TP reached (with a small
+    touch-tolerance for market-close overshoot), SL, or MAN (manual/other)."""
+    price = float(price)
+    tol = 0.5  # price units a fill may overshoot the TP (XAUUSD ~5 pips)
+    reached = []
+    for i, tp in enumerate(tps or [], start=1):
+        if direction == "buy" and price >= float(tp) - tol:
+            reached.append(i)
+        elif direction == "sell" and price <= float(tp) + tol:
+            reached.append(i)
+    if reached:
+        return f"TP{max(reached)}"
+    if sl is not None:
+        if (direction == "buy" and price <= float(sl)) or (
+            direction == "sell" and price >= float(sl)
+        ):
+            return "SL"
+    return "MAN"
+
+
+def grouped_trades(limit_groups: int = 50):
+    """Trades grouped by signal tag, with per-layer open/close detail rows."""
+    import time as _time
+
+    with get_conn() as conn:
+        sigs = {
+            r["signal_id"]: r
+            for r in conn.execute("SELECT * FROM signals").fetchall()
+        }
+        rows = conn.execute(
+            "SELECT * FROM trades WHERE tag != '' ORDER BY ts"
+        ).fetchall()
+
+    groups: dict[str, dict] = {}
+    for r in rows:
+        tag = r["tag"]
+        g = groups.setdefault(
+            tag,
+            {
+                "tag": tag,
+                "received_at": None,
+                "symbol": r["symbol"],
+                "direction": r["direction"],
+                "entry": None,
+                "sl": None,
+                "tps": [],
+                "layers": None,
+                "status": "",
+                "exit": "",
+                "opens": {},
+                "closes": {},
+            },
+        )
+        if r["kind"] == "open":
+            g["opens"][r["position_id"]] = r
+        else:
+            g["closes"].setdefault(r["position_id"], []).append(r)
+
+    out = []
+    for tag, g in groups.items():
+        sig = sigs.get(tag)
+        if sig:
+            g["received_at"] = sig["received_at"]
+            g["symbol"] = sig["symbol"]
+            g["direction"] = sig["direction"]
+            g["entry"] = sig["entry"]
+            g["sl"] = sig["sl"]
+            g["tps"] = json.loads(sig["tps"]) if sig["tps"] else []
+            g["layers"] = sig["layers"]
+            g["status"] = sig["status"]
+            g["exit"] = sig["exit"] or ""
+
+        layer_rows = []
+        level_counts: dict[str, int] = {}
+        total_pnl = 0.0
+        total_volume = 0.0
+        positions = list(g["opens"].keys()) or list(g["closes"].keys())
+        positions.sort(key=lambda p: g["opens"][p]["ts"] if p in g["opens"] else 0)
+        for p in positions:
+            open_r = g["opens"].get(p)
+            closes = g["closes"].get(p, [])
+            layer = {
+                "position_id": p,
+                "volume": float(open_r["volume"] if open_r else (closes[0]["volume"] if closes else 0)),
+                "open_ts": open_r["ts"] if open_r else None,
+                "open_price": open_r["price"] if open_r else None,
+                "closes": [],
+                "pnl": 0.0,
+                "level": "",
+            }
+            for cl in closes:
+                level = close_level(cl["price"], g["tps"], g["sl"], g["direction"])
+                layer["closes"].append({
+                    "ts": cl["ts"],
+                    "price": cl["price"],
+                    "volume": cl["volume"],
+                    "pnl": round(realized(cl), 2),
+                    "level": level,
+                })
+                layer["pnl"] = round(layer["pnl"] + realized(cl), 2)
+                layer["level"] = level
+                level_counts[level] = level_counts.get(level, 0) + 1
+                total_pnl += realized(cl)
+            total_volume += layer["volume"]
+            layer_rows.append(layer)
+
+        badges = sorted(
+            level_counts,
+            key=lambda lvl: (lvl not in ("TP1", "TP2", "TP3"), -int(lvl[2:]) if lvl.startswith("TP") else 0),
+        )
+        exit_label = (
+            max((l for l in badges if l.startswith("TP")), key=lambda l: int(l[2:]))
+            if any(l.startswith("TP") for l in badges)
+            else (badges[0] if badges else "")
+        )
+        g["exit"] = g["exit"] or exit_label
+        g["badges"] = badges
+        g["layers_detail"] = layer_rows
+        g["pnl"] = round(total_pnl, 2)
+        g["volume"] = round(total_volume, 2)
+        g["opened_at"] = min((l["open_ts"] for l in layer_rows if l["open_ts"]), default=None)
+        g["last_close_at"] = max(
+            (c["ts"] for l in layer_rows for c in l["closes"]), default=None
+        )
+        g.pop("opens", None)
+        g.pop("closes", None)
+        out.append(g)
+
+    out.sort(key=lambda g: g["opened_at"] or 0, reverse=True)
+    return out[:limit_groups]
 
 
 def daily_pnl(days_all: bool = False):
