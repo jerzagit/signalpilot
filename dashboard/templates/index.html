@@ -8,30 +8,31 @@
 {% block content %}
 <div class="page-header">
   <h1>Calendar — {{ view.month_name }} <em>{{ view.year }}</em></h1>
-  <p>Realized profit per day plus account balance growth. Data comes from the
+  <p>Account growth on top, realized profit per day below. Data comes from the
   on-disk MT5 deal mirror — no terminal needed.</p>
 </div>
 
-<div class="kpis">
-  <div class="kpi gold">
-    <div class="card-title">Balance now</div>
-    <div class="card-value" id="kpi-balance">${{ "{:,.2f}".format(last_balance) }}</div>
-    <div class="sig-chip">baseline ${{ "{:,.2f}".format(chart.baseline) }}</div>
+<div class="card card-pad">
+  <div class="card-title">Account growth — balance after each closed day</div>
+  <div class="chart-box"><canvas id="growthChart"></canvas></div>
+</div>
+
+<div class="kpis kpis-compact">
+  <div class="kpi-mini gold">
+    <span class="card-title">Balance</span>
+    <span class="card-value" id="kpi-balance">${{ "{:,.2f}".format(last_balance) }}</span>
   </div>
-  <div class="kpi">
-    <div class="card-title">Total profit (bot)</div>
-    <div class="card-value {% if total_pnl >= 0 %}text-success{% else %}text-danger{% endif %}" id="kpi-pnl">${{ "{:,.2f}".format(total_pnl) }}</div>
-    <div class="sig-chip">all time, realized</div>
+  <div class="kpi-mini">
+    <span class="card-title">Total</span>
+    <span class="card-value {% if total_pnl >= 0 %}text-success{% else %}text-danger{% endif %}" id="kpi-pnl">${{ "{:,.2f}".format(total_pnl) }}</span>
   </div>
-  <div class="kpi">
-    <div class="card-title">Month {{ view.month_name }}</div>
-    <div class="card-value {% if view.month_pnl >= 0 %}text-success{% else %}text-danger{% endif %}">${{ "{:,.2f}".format(view.month_pnl) }}</div>
-    <div class="sig-chip">{{ view.num_trading_days }} trading day(s) · {{ view.signals_count }} signal(s)</div>
+  <div class="kpi-mini">
+    <span class="card-title">Month</span>
+    <span class="card-value {% if view.month_pnl >= 0 %}text-success{% else %}text-danger{% endif %}">${{ "{:,.2f}".format(view.month_pnl) }}</span>
   </div>
-  <div class="kpi">
-    <div class="card-title">Win rate</div>
-    <div class="card-value">{{ "{:.1f}".format(win_rate) }}%</div>
-    <div class="sig-chip">{{ stats.wins }} W · {{ stats.losses }} L · {{ stats.deals }} closes</div>
+  <div class="kpi-mini">
+    <span class="card-title">Win rate</span>
+    <span class="card-value">{{ "{:.1f}%".format(win_rate) }}</span>
   </div>
 </div>
 
@@ -76,11 +77,6 @@
     <span><span class="dot pos"></span> positive day</span>
     <span><span class="dot neg"></span> negative day</span>
   </div>
-</div>
-
-<div class="card card-pad" style="margin-top:22px;">
-  <div class="card-title">Account growth — balance after each closed day</div>
-  <div class="chart-box"><canvas id="growthChart"></canvas></div>
 </div>
 {% endblock %}
 

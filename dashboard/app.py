@@ -180,6 +180,12 @@ def api_trades():
     return jsonify(db.recent_trades(limit))
 
 
+@app.route("/api/grouped")
+def api_grouped():
+    limit = int(request.args.get("limit", "50"))
+    return jsonify(db.grouped_trades(limit))
+
+
 @app.route("/api/stats")
 def api_stats():
     return jsonify(db.stats())

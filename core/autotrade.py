@@ -44,7 +44,7 @@ from core.config import (
     PIP_SIZE,
     RISK_PERCENT,
 )
-from core.db import mark_signal_done, record_signal, sync_from_mt5
+from core.db import mark_signal_exit, record_signal, sync_from_mt5
 from core.forwarder import notify_admin
 from core.signal import FollowUpAlert, Signal
 
@@ -407,6 +407,7 @@ def _manage(state: dict, key: str, trade: dict, followup: FollowUpAlert) -> str:
 
     closed_volume = 0.0
     reason = ""
+    exit_label = "MAN"
 
     if action == "tp_hit":
         if level == 1 and layers > 1 and not trade.get("tp1_done"):
@@ -417,12 +418,14 @@ def _manage(state: dict, key: str, trade: dict, followup: FollowUpAlert) -> str:
         elif level >= 2:
             closed_volume = _close_all(symbol)
             reason = f"TP{'2' if level == 2 else '3'}: closed {closed_volume:g}"
+            exit_label = f"TP{level}"
             trade["done"] = True
         else:
             reason = "TP1: single layer, holding to TP2"
     elif action in ("sl_hit", "close_all"):
         closed_volume = _close_all(symbol)
         reason = f"{action}: closed {closed_volume:g}"
+        exit_label = "SL" if action == "sl_hit" else "MAN"
         trade["done"] = True
 
     if closed_volume:
@@ -433,7 +436,7 @@ def _manage(state: dict, key: str, trade: dict, followup: FollowUpAlert) -> str:
     _save(state)
     _sync_db(state)
     if trade.get("done"):
-        mark_signal_done(trade.get("tag") or key.split(":", 1)[-1])
+        mark_signal_exit(trade.get("tag") or key.split(":", 1)[-1], exit_label)
     return reason
 
 
@@ -518,7 +521,7 @@ def _monitor_prices() -> None:
             trade["done"] = True
             trade["reason"] = "closed (external TP/SL)"
             changed = True
-            mark_signal_done(trade.get("tag") or key.split(":", 1)[-1])
+            mark_signal_exit(trade.get("tag") or key.split(":", 1)[-1], "EXT")
             continue
         tick = _tick(symbol)
         if not tick:
