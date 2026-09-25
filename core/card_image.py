@@ -179,7 +179,7 @@ def render_signal_card(
     y += 84
 
     box_w = (WIDTH - PAD * 2 - 2 * 20) // 3
-    labels = ("PROFIT", "TP1", "TP2")
+    labels = ("TP1", "TP2", "EXIT")
     labels = labels + tuple(f"TP{i + 1}" for i in range(3, len(signal.tps))) if len(signal.tps) > 3 else labels[:len(signal.tps)]
     for i, (label, tp) in enumerate(zip(labels, signal.tps)):
         x0 = PAD + i * (box_w + 20)

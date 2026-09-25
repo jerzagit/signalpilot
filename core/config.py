@@ -65,7 +65,7 @@ CHART_WINDOW_TITLE = os.getenv(
 
 # Auto-trading via the MT5 terminal running on this PC (core/autotrade.py).
 # Only GEO signals open trades; follow-ups manage them (TP1 = close half of
-# multi-layer, TP2 = close rest, TP3/SL/CLOSE ALL = close whatever is left).
+# multi-layer, TP2 = close about a quarter, Exit/SL/CLOSE ALL = close the rest).
 AUTOTRADE_ENABLED = os.getenv("AUTOTRADE_ENABLED", "false").lower() in {
     "1", "true", "yes", "on",
 }
@@ -73,18 +73,12 @@ AUTOTRADE_ENABLED = os.getenv("AUTOTRADE_ENABLED", "false").lower() in {
 RISK_PERCENT = float(os.getenv("RISK_PERCENT", "5"))
 # Base lot size used for each layer.
 AUTO_LOT_SIZE = float(os.getenv("AUTO_LOT_SIZE", "0.01"))
-# Pip size in price units per symbol (XAUUSD: 1 pip = 0.10 -> 50 pips = 5.00).
-PIP_SIZE = {k.strip(): float(v) for k, v in [
-    pair.split("=") for pair in os.getenv("AUTO_PIP_SIZE", "XAUUSD=0.10").split(",") if "=" in pair
-]}
 # Close layers automatically when price crosses GEO targets (TP1 = half the
-# layers, TP2/TP3 = the rest) instead of only reacting to Telegram follow-ups.
+# layers, TP2 = about a quarter, Exit = the rest) or only on Telegram follow-ups.
 PRICE_TP_CLOSE = os.getenv("PRICE_TP_CLOSE", "true").lower() in {
     "1", "true", "yes", "on",
 }
-# Breakeven: move SL to entry after this many pips in favor.
-BE_PIPS = float(os.getenv("BE_PIPS", "50"))
-# How often (seconds) the breakeven price monitor polls live positions.
+# How often (seconds) the price monitor polls live positions.
 BE_POLL_SECS = int(os.getenv("BE_POLL_SECS", "5"))
 # Optional MT5 terminal path override (auto-detected if empty).
 MT5_TERMINAL_PATH = os.getenv("MT5_TERMINAL_PATH", "")

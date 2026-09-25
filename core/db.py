@@ -203,8 +203,20 @@ def close_level(price: float, tps: list[float], sl: float | None, direction: str
     return "MAN"
 
 
+_LEVEL_LABELS = ("TP1", "TP2", "Exit")
+
+
+def _level_rank(label: str) -> int:
+    """Ordering for level badges: Exit is the final target (highest)."""
+    if label == "Exit":
+        return 10**6
+    if label.startswith("TP"):
+        return int(label[2:]) or 0
+    return 0
+
+
 def close_level(price: float, tps: list[float], sl: float | None, direction: str) -> str:
-    """Which exit a close price maps to: highest TP reached (with a small
+    """Which exit a close price maps to: highest target reached (with a small
     touch-tolerance for market-close overshoot), SL, or MAN (manual/other)."""
     price = float(price)
     tol = 0.5  # price units a fill may overshoot the TP (XAUUSD ~5 pips)
@@ -215,7 +227,8 @@ def close_level(price: float, tps: list[float], sl: float | None, direction: str
         elif direction == "sell" and price <= float(tp) + tol:
             reached.append(i)
     if reached:
-        return f"TP{max(reached)}"
+        index = max(reached) - 1
+        return _LEVEL_LABELS[index] if index < len(_LEVEL_LABELS) else f"TP{index + 1}"
     if sl is not None:
         if (direction == "buy" and price <= float(sl)) or (
             direction == "sell" and price >= float(sl)
@@ -335,11 +348,12 @@ def grouped_trades(limit_groups: int = 50, from_ts: int | None = None, to_ts: in
 
         badges = sorted(
             level_counts,
-            key=lambda lvl: (lvl not in ("TP1", "TP2", "TP3"), -int(lvl[2:]) if lvl.startswith("TP") else 0),
+            key=lambda lvl: (_level_rank(lvl) <= 0, -_level_rank(lvl)),
         )
+        hit_levels = [l for l in badges if _level_rank(l) > 0]
         exit_label = (
-            max((l for l in badges if l.startswith("TP")), key=lambda l: int(l[2:]))
-            if any(l.startswith("TP") for l in badges)
+            max(hit_levels, key=_level_rank)
+            if hit_levels
             else (badges[0] if badges else "")
         )
         g["exit"] = g["exit"] or exit_label

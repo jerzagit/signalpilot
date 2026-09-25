@@ -30,7 +30,14 @@ log = logging.getLogger(__name__)
 PARSE_MODE = "Markdown"
 _BORDER = "▬" * 16
 
-_TP_LABELS = ("Profit", "TP1", "TP2", "Exit")
+_TP_LABELS = ("TP1", "TP2", "Exit")
+
+
+def _level_label(level: int) -> str:
+    """Target name for a 1-based level, matching the card's own label set."""
+    if 0 < level <= len(_TP_LABELS):
+        return _TP_LABELS[level - 1]
+    return f"TP{level}"
 
 
 def _fmt_price(value: float) -> str:
@@ -96,7 +103,7 @@ def build_signal_card(
         f"Stop Loss (SL): `{_fmt_price(signal.sl)}`",
     ]
     for index, tp in enumerate(signal.tps):
-        label = _TP_LABELS[index] if index < len(_TP_LABELS) else f"TP{index + 1}"
+        label = _level_label(index + 1)
         rows.append(f"{label:<13} : `{_fmt_price(tp)}`")
 
     headline_rows = []
@@ -123,7 +130,7 @@ def build_signal_card(
 def build_followup_card(alert: FollowUpAlert, source_label: str = "", raw_text: str = "") -> str:
     label = _FOLLOWUP_LABELS.get(alert.action, alert.action.replace("_", " ").title())
     if alert.action == "tp_hit" and getattr(alert, "level", 0):
-        label = f"✅ TP{alert.level} hit"
+        label = f"✅ {_level_label(int(alert.level))} hit"
     details = alert.symbol or "Position"
     return (
         f"{CHANNEL_HEADER} · {label}\n"

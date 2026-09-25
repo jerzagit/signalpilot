@@ -11,39 +11,43 @@ Drivers:
 | Trigger | Action |
 | --- | --- |
 | `GEO BUY TRIGGERED!` / `GEO SELL TRIGGERED!` | Open market order |
-| `TP1 HIT` | Close half of the layers (multi-layer only) |
-| `TP2 HIT` | Close the rest (single layer: everything) |
-| `TP3 HIT` | Close whatever is left |
+| `TP1 HIT` | Close half the layers; the runner's SL moves to the **TP1 price** (TP1-breakeven) |
+| `TP2 HIT` | Multi-layer: close ~a quarter more (SL stays at TP1); single layer: close everything |
+| `Exit` / `TP3 HIT` | Close whatever is left |
 | `CLOSE ALL POSITION NOW` | Close whatever is left |
 | `SL HIT` | Close whatever is left (ensure exit) |
 
 ## Money Management
 
-- **Risk budget**: `RISK_PERCENT` (5%) of current **account equity**.
-- **Lot size**: totals `0.01 x n` lots, where `n` = number of `AUTO_LOT_SIZE`
-  (0.01) layers that fit inside the 5% margin budget:
-  `n = floor(5% x equity / margin_for_0.01_lot)`.
-- **Pip size** (gold): `AUTO_PIP_SIZE=XAUUSD=0.10` → **50 pips = 5.00** price
-  distance.
-- **Breakeven**: when price moves `BE_PIPS` (50 = 5.00) in favor, the stop loss
-  is moved to the entry price. Applies to single- and multi-layer alike.
+- **Risk budget**: `RISK_PERCENT` of current **account equity**.
+- **Lot size**: totals `AUTO_LOT_SIZE x n`, where `n` is the number of layers
+  that fit inside the configured margin budget:
+  `n = floor((RISK_PERCENT / 100) x equity / margin_for_AUTO_LOT_SIZE)`.
+- **TP1-breakeven**: protection starts when price reaches TP1 — the runner's
+  stop loss is moved to the **TP1 price**, so a reversal after TP1 still exits
+  at TP1 (profit locked). Applies to single- and multi-layer alike.
 
 ### Exit behaviour by layer count
 
-| Layers (`n`) | TP1 HIT | TP2 / TP3 HIT |
-| --- | --- | --- |
-| 1 (0.01 x 1) | Hold (`BREAKEVEN` already handled) | Close all at TP2 |
-| >1 (0.01 x n) | Close `n // 2` layers (at least 1) | Close the rest |
+| Layers (`n`) | TP1 HIT | TP2 HIT | Exit / TP3 HIT |
+| --- | --- | --- | --- |
+| 1 | Hold; SL → TP1 | Close the only layer | — |
+| 2 | Close 1; SL → TP1 | Hold | Close the last layer |
+| 3 or more | Close `n // 2`; SL → TP1 | Close about `n / 4`, always leaving at least 1 for Exit | Close the rest |
 
-Example: 5 layers opened → `TP1 HIT` closes 2 layers (0.02), `TP2 HIT` closes
-the remaining 3 (0.03).
+Example: 8 layers opened → `TP1 HIT` closes 4 (0.04) and locks the runner SL at
+TP1; `TP2 HIT` closes 2 more (0.02); `Exit` closes the last 2 (0.02). A 2-layer
+trade skips TP2 (1 at TP1, 1 at Exit).
 
 ## Order Details
 
 - **Entry**: current market price at trigger time.
 - **Initial SL**: GEO's *Stoploss* value.
-- **Order TP**: GEO's last target — a safety net only; real exits are driven by
-  the follow-up messages above.
+- **Order TP**: GEO's last target — a safety net only. Telegram follow-ups and,
+  when `PRICE_TP_CLOSE=true`, live target crossings use the same serialized,
+  resumable scale-out path. Completed-stage flags and counts prevent normal
+  trigger overlap; incomplete broker operations remain pending for retry. A
+  final Exit signal or target supersedes a pending TP1/TP2 operation.
 - **Magic**: `260924` (identifies bot trades; human trades are never touched).
 - **Dedupe**: one trade per `Signal Tag` per source; duplicates ignored. State is
   persisted in `data/autotrades.json` so a bot restart does not double-open.
@@ -53,11 +57,17 @@ the remaining 3 (0.03).
 - Requires the **MT5 terminal to be running and logged in** with the
   **Algo trading** button enabled; Python connects through the installed
   `MetaTrader5` package (installed in `.venv`).
-- A background monitor polls live positions every `BE_POLL_SECS` (5s) and
-  applies the breakeven move; it also marks trades "closed" if they exited
-  externally (e.g. terminal SL/TP).
-- Every open / breakeven / close sends a notification to the bot admins
-  (`ADMIN_CHATS`).
+- A background monitor polls live positions every `BE_POLL_SECS` (default 5s).
+  When `PRICE_TP_CLOSE=true`, it applies target scale-outs and marks trades
+  closed if they exited externally (for example, through terminal SL/TP).
+- Open, target-reached, scale-out, and close events notify the configured bot
+  admins (`ADMIN_CHATS`).
+- State updates from message handling, price monitoring, and trade opening are
+  serialized; admin notifications are sent after that lock is released.
+  Incomplete closes or SL updates remain pending and retry each monitor cycle.
+  Legacy `tp1_done` state is upgraded by anchoring TP1 without closing those
+  layers again. A hard process interruption after broker accepts an order but
+  before state is saved can still require manual reconciliation.
 
 ## Enabling
 
@@ -67,33 +77,19 @@ In `.env`:
 AUTOTRADE_ENABLED=true    # flip to true to go live
 RISK_PERCENT=5
 AUTO_LOT_SIZE=0.01
-AUTO_PIP_SIZE=XAUUSD-VIP=0.10
-BE_PIPS=50
+PRICE_TP_CLOSE=true
 BE_POLL_SECS=5
 MT5_TERMINAL_PATH=        # optional explicit path, auto-detected if blank
-MT5_ACCOUNT=1288795       # guard: only trades when THIS login is active
-MT5_LOGIN=1288795         # auto-login credentials (optional)
-MT5_PASSWORD=<on-demo-account>
-MT5_SERVER=VTMarkets-Demo
+MT5_ACCOUNT=<account-login>
+MT5_LOGIN=                 # optional; leave blank when the terminal is logged in
+MT5_PASSWORD=
+MT5_SERVER=
 MT5_SYMBOL_MAP=XAUUSD=XAUUSD-VIP
 ```
 
 Then restart the bot (`python bot.py`). The bot connects to the local MT5
-terminal (auto-logging into the configured login if the terminal is not
-already there), and refuses to trade unless `MT5_ACCOUNT` is the active login.
+terminal and can auto-login when credentials are configured. When
+`MT5_ACCOUNT` is set, it refuses to trade unless that account is active.
 
-## Current Account (demo)
-
-| Setting | Value |
-| --- | --- |
-| Account | 1288795 |
-| Type | Standard STP |
-| Leverage | 500 : 1 |
-| Server | VTMarkets-Demo |
-| Balance | ≈ 1417.74 USD |
-
-With a gold margin of ~$8.50 per 0.01 layer at 500:1 leverage (~$4,250 price),
-the 5% budget (~$70.9) works out to roughly **8 layers ≈ 0.08 lots** per signal.
-
-Keep the MT5 terminal running and logged into account `1288795` with the
+Keep the MT5 terminal running and logged into the configured account with the
 **Algo trading** button enabled while the bot is live.

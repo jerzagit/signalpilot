@@ -8,10 +8,10 @@ Driven by GEO signals:
     a 0.08 budget = 8 x 0.01 positions, never one 0.08 blob.
   * Initial stop loss        -> GEO's Stop Loss; order TP -> GEO's last target
     as a safety net (managed messages do the real exits).
-  * +BE_PIPS in favour       -> each layer's SL moved to its own fill price
-    (breakeven).
-  * TP1 HIT (multi-layer)    -> close half of the layers (0.01 each).
-  * TP2 / TP3 HIT            -> close the remaining layers.
+  * TP1 HIT                  -> close half the layers; the runner's SL moves to
+    the TP1 price (TP1-breakeven), so a reverse after TP1 never gives back gain.
+  * TP2 HIT (multi-layer)    -> close ~a quarter more; the SL stays at TP1.
+  * Exit (TP3 HIT)           -> close whatever is left.
   * CLOSE ALL / SL HIT       -> close whatever is left.
 
 Only trades opened by this bot (fixed MAGIC) are ever touched. Per-layer
@@ -23,7 +23,10 @@ import asyncio
 import json
 import logging
 import re
+import threading
 import time
+from contextvars import ContextVar
+from functools import wraps
 from pathlib import Path
 
 import MetaTrader5 as mt5
@@ -32,7 +35,6 @@ from core.config import (
     ACCOUNT_BASELINE,
     AUTO_LOT_SIZE,
     AUTOTRADE_ENABLED,
-    BE_PIPS,
     BE_POLL_SECS,
     DB_SYNC_ENABLED,
     MT5_ACCOUNT,
@@ -41,7 +43,6 @@ from core.config import (
     MT5_SERVER,
     MT5_SYMBOL_MAP,
     MT5_TERMINAL_PATH,
-    PIP_SIZE,
     PRICE_TP_CLOSE,
     RISK_PERCENT,
 )
@@ -53,6 +54,10 @@ log = logging.getLogger(__name__)
 
 STATE_FILE = Path("data/autotrades.json")
 MAGIC = 260924  # identifies trades this bot opened
+_STATE_LOCK = threading.RLock()
+_ADMIN_NOTICES: ContextVar[list[str] | None] = ContextVar(
+    "autotrade_admin_notices", default=None
+)
 
 # trade state: key = "<source_id>:<tag>"
 # {
@@ -60,7 +65,8 @@ MAGIC = 260924  # identifies trades this bot opened
 #     "source_id", "tag", "symbol", "mt5_symbol", "direction",
 #     "entry" (avg fill), "fills" {ticket(str): entry_price}, "layers",
 #     "volume0", "tickets" [int, ...],
-#     "sl_geos", "open_ts", "be_done", "tp1_done", "done"
+#     "sl_geos", "open_ts", "tp1_closed", "tp1_sl_done", "tp1_done",
+#     "tp2_closed", "tp2_done", "pending_action", "done"
 #   }
 # }
 
@@ -109,15 +115,6 @@ def _ready() -> bool:
         return False
 
 
-def symbol_pip(symbol: str, digits: int | None = None) -> float:
-    """Price units per 1 pip (XAUUSD default 0.10 -> 50 pips = 5.00)."""
-    if symbol in PIP_SIZE:
-        return PIP_SIZE[symbol]
-    if digits is not None:
-        return 10 ** -digits
-    return 0.10
-
-
 def _tick(symbol: str) -> tuple[float, float] | None:
     t = mt5.symbol_info_tick(symbol)
     if not t:
@@ -126,7 +123,7 @@ def _tick(symbol: str) -> tuple[float, float] | None:
 
 
 def calc_layers(symbol: str, direction: str, equity: float) -> int:
-    """n = how many 0.01-lot layers the 5% margin budget can hold (>=1)."""
+    """Return how many configured lot-size layers fit the margin budget."""
     price = _tick(symbol)
     if not price:
         return 0
@@ -161,6 +158,42 @@ def _save(state: dict) -> None:
     )
 
 
+def _admin_notice(text: str) -> None:
+    notices = _ADMIN_NOTICES.get()
+    if notices is None:
+        notify_admin(text)
+    else:
+        notices.append(text)
+
+
+def _flush_admin_notices(notices: list[str]) -> None:
+    for text in notices:
+        notify_admin(text)
+
+
+def _state_locked(function):
+    @wraps(function)
+    def wrapped(*args, **kwargs):
+        notices: list[str] = []
+        try:
+            with _STATE_LOCK:
+                if _ADMIN_NOTICES.get() is not None:
+                    return function(*args, **kwargs)
+                token = _ADMIN_NOTICES.set([])
+                try:
+                    result = function(*args, **kwargs)
+                finally:
+                    notices = _ADMIN_NOTICES.get()
+                    _ADMIN_NOTICES.reset(token)
+        except BaseException:
+            _flush_admin_notices(notices)
+            raise
+        _flush_admin_notices(notices)
+        return result
+
+    return wrapped
+
+
 def _live_positions(symbol: str | None = None) -> list:
     """All live positions opened by this bot's MAGIC (optionally on symbol)."""
     if symbol:
@@ -181,14 +214,6 @@ def _trade_tickets(trade: dict) -> list[int]:
     if trade.get("ticket"):
         return [int(trade["ticket"])]
     return []
-
-
-def _trade_fills(trade: dict) -> dict[str, float]:
-    fills = trade.get("fills")
-    if isinstance(fills, dict) and fills:
-        return {str(k): float(v) for k, v in fills.items()}
-    fallback = trade.get("entry", 0) or 0
-    return {str(t): fallback for t in _trade_tickets(trade)}
 
 
 def _close_ticket(pos) -> float:
@@ -240,6 +265,221 @@ def _close_target(symbol: str, n_tickets: int) -> tuple[float, int]:
     return closed, count
 
 
+def _stage_sizes(layers: int) -> tuple[int, int, int]:
+    """Multi-layer scale-out: (TP1, TP2, Exit) layer counts from original n.
+
+    TP1 = half, TP2 = about a quarter, Exit = the rest (>= 1 layer). For very
+    small layer counts TP2 shrinks to 0 (n=2 -> hold straight to Exit).
+    """
+    n = int(layers)
+    if n <= 0:
+        return 0, 0, 0
+    if n == 1:
+        return 0, 0, 1
+    s1 = max(1, n // 2)
+    if n - s1 >= 2:
+        s2 = min(max(1, round(n / 4)), n - s1 - 1)
+    else:
+        s2 = 0
+    return s1, s2, n - s1 - s2
+
+
+def _terminal_level(trade: dict, live_layers: int | None = None) -> int:
+    try:
+        initial_layers = int(
+            trade.get("initial_layers") or trade.get("layers") or 0
+        )
+    except (TypeError, ValueError):
+        initial_layers = 0
+    if initial_layers < 1:
+        if live_layers is None:
+            live_layers = len(
+                _live_positions(trade.get("mt5_symbol") or trade.get("symbol"))
+            )
+        initial_layers = live_layers or 2
+    return 2 if initial_layers == 1 else 3
+
+
+def _runner_sl_to_tp1(trade: dict, sl_price: float) -> bool:
+    """Anchor the runner's SL at the TP1 price (TP1-breakeven)."""
+    symbol = trade.get("mt5_symbol") or trade["symbol"]
+    positions = _live_positions(symbol)
+    if not positions:
+        return False
+    success = True
+    for pos in positions:
+        request = {
+            "action": mt5.TRADE_ACTION_SLTP,
+            "symbol": symbol,
+            "position": pos.ticket,
+            "sl": float(sl_price),
+            "tp": float(pos.tp) if getattr(pos, "tp", None) else 0.0,
+            "magic": MAGIC,
+        }
+        result = mt5.order_send(request)
+        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
+            log.info("AUTOTRADE: TP1-breakeven set %s layer %s SL -> %g",
+                     symbol, pos.ticket, float(sl_price))
+        else:
+            success = False
+            log.error("AUTOTRADE: SLTP modify failed retcode=%s",
+                      getattr(result, "retcode", "?"))
+    return success
+
+
+def _release_stage(symbol: str, trade: dict, level: int) -> str:
+    """Apply one TP scale-out stage. Shared by message + price paths so both
+    behave identically.
+
+    Level 1 (TP1):   close half the layers, then anchor the runner SL at the
+                     TP1 price. A single layer only anchors (no close).
+    Level 2 (TP2):   close ~a quarter more (multi-layer) and hold; a single
+                     layer closes everything at TP2. SL stays at TP1.
+    Level >= 3 (Exit): close whatever is left; trade done, recorded as Exit.
+    """
+    layers = int(trade.get("layers") or 0)
+    volume0 = trade.get("volume0", 0)
+    tag = trade["tag"]
+    tps = trade.get("tps") or ([trade["tp_safety"]] if trade.get("tp_safety") else [])
+    tp1 = float(tps[0]) if tps else (float(trade.get("entry") or 0))
+    closed = 0.0
+    count = 0
+    reason = ""
+
+    if trade.get("done"):
+        trade.pop("pending_action", None)
+        reason = "already closed"
+    elif level == 1:
+        target = _stage_sizes(layers)[0]
+        if "tp1_closed" not in trade:
+            trade["tp1_closed"] = target if trade.get("tp1_done") else 0
+        previous_count = int(trade.get("tp1_closed") or 0)
+        if trade.get("tp1_done") and trade.get("tp1_sl_done"):
+            trade.pop("pending_action", None)
+            reason = "TP1: already scaled out"
+        else:
+            remaining = max(0, target - previous_count)
+            if remaining:
+                closed, count = _close_target(symbol, remaining)
+            closed_count = previous_count + count
+            trade["tp1_closed"] = closed_count
+            if not trade.get("tp1_sl_done"):
+                trade["tp1_sl_done"] = _runner_sl_to_tp1(trade, tp1)
+            if closed_count >= target and trade.get("tp1_sl_done"):
+                trade["tp1_done"] = True
+                trade.pop("pending_action", None)
+                if layers == 1:
+                    reason = "TP1: single layer, holding to TP2"
+                elif count and previous_count == 0 and closed_count == target:
+                    reason = (
+                        f"TP1: closed {closed:g} of {volume0:g} "
+                        f"({closed_count}/{layers} layers)"
+                    )
+                else:
+                    reason = (
+                        f"TP1: released {closed_count}/{layers} layers; "
+                        "SL set at TP1"
+                    )
+            elif closed_count >= target:
+                trade["pending_action"] = "tp1"
+                reason = "TP1: SL update pending"
+            else:
+                trade["pending_action"] = "tp1"
+                reason = (
+                    f"TP1: closed {closed:g} of {volume0:g} "
+                    f"({closed_count}/{layers} layers); close pending"
+                )
+    elif level == 2:
+        if trade.get("tp2_done"):
+            trade.pop("pending_action", None)
+            reason = "TP2: already scaled out"
+        elif layers > 1:
+            target = _stage_sizes(layers)[1]
+            previous_count = int(trade.get("tp2_closed") or 0)
+            remaining = max(0, target - previous_count)
+            if remaining:
+                closed, count = _close_target(symbol, remaining)
+            closed_count = previous_count + count
+            trade["tp2_closed"] = closed_count
+            if closed_count >= target:
+                trade["tp2_done"] = True
+                trade.pop("pending_action", None)
+                if target == 0:
+                    reason = "TP2: holding to Exit"
+                elif count and previous_count == 0 and closed_count == target:
+                    reason = f"TP2: closed {closed:g} ({closed_count}/{layers} layers)"
+                else:
+                    reason = f"TP2: released {closed_count}/{layers} layers"
+            else:
+                trade["pending_action"] = "tp2"
+                reason = (
+                    f"TP2: closed {closed:g} ({closed_count}/{layers} layers); "
+                    "close pending"
+                )
+        else:
+            closed = _close_all(symbol)
+            if _live_positions(symbol):
+                trade["pending_action"] = "tp2"
+                reason = f"TP2: closed {closed:g}; close pending"
+            else:
+                reason = f"TP2: closed {closed:g}"
+                trade["tp2_done"] = True
+                trade["done"] = True
+                trade["exit_price"] = "TP2"
+                trade.pop("pending_action", None)
+    elif level >= 3:
+        closed = _close_all(symbol)
+        if _live_positions(symbol):
+            trade["pending_action"] = "exit"
+            reason = f"Exit: closed {closed:g}; close pending"
+        else:
+            reason = f"Exit: closed {closed:g}"
+            trade["done"] = True
+            trade["exit_price"] = "Exit"
+            trade.pop("pending_action", None)
+    else:
+        reason = f"unrecognized TP level: {level}"
+
+    if closed:
+        log.info("AUTOTRADE: %s — %s [tag %s]", reason, symbol, tag)
+        _admin_notice(f"💰 AUTO {reason} — {symbol} [tag {tag}]")
+    else:
+        log.info("AUTOTRADE: %s — %s [tag %s]", reason, symbol, tag)
+    return reason
+
+
+def _retry_pending_action(symbol: str, trade: dict) -> bool:
+    action = trade.get("pending_action")
+    if not action:
+        return False
+    if action == "tp1":
+        _release_stage(symbol, trade, 1)
+    elif action == "tp2":
+        _release_stage(symbol, trade, 2)
+    elif action == "exit":
+        _release_stage(symbol, trade, 3)
+    elif action in ("sl_hit", "close_all", "setup_failed"):
+        closed = _close_all(symbol)
+        if _live_positions(symbol):
+            reason = f"{action}: closed {closed:g}; close pending"
+        else:
+            reason = f"{action}: closed {closed:g}"
+            trade["done"] = True
+            trade["exit_price"] = {
+                "sl_hit": "SL",
+                "close_all": "MAN",
+                "setup_failed": "VOID",
+            }[action]
+            trade.pop("pending_action", None)
+        log.info("AUTOTRADE: %s — %s [tag %s]", reason, symbol, trade["tag"])
+        if closed:
+            _admin_notice(f"💰 AUTO {reason} — {symbol} [tag {trade['tag']}]")
+    else:
+        log.error("AUTOTRADE: unknown pending action %s", action)
+        trade.pop("pending_action", None)
+    return True
+
+
 def _sync_db(state: dict) -> None:
     """Mirror the latest MT5 deals into the SQLite calendar store."""
     if not DB_SYNC_ENABLED:
@@ -256,6 +496,7 @@ def _sync_db(state: dict) -> None:
         log.error("AUTOTRADE: db sync failed: %s", exc)
 
 
+@_state_locked
 def open_for_signal(signal: Signal, source_id: str, raw: str) -> str:
     """Open the signal as 0.01-lot layers. Returns a human summary."""
     if not AUTOTRADE_ENABLED:
@@ -286,7 +527,7 @@ def open_for_signal(signal: Signal, source_id: str, raw: str) -> str:
 
     layers = calc_layers(mtsym, side, float(info.equity))
     if layers < 1:
-        notify_admin(
+        _admin_notice(
             f"⚠️ AUTO: margin for 0.01 {mtsym} exceeds {RISK_PERCENT:.0f}% equity "
             f"({info.equity:.2f}) — trade skipped."
         )
@@ -328,7 +569,7 @@ def open_for_signal(signal: Signal, source_id: str, raw: str) -> str:
         fills[str(result.order)] = fill
 
     if not tickets:
-        notify_admin(f"⚠️ AUTO: no layers filled for {mtsym} — check terminal.")
+        _admin_notice(f"⚠️ AUTO: no layers filled for {mtsym} — check terminal.")
         return "AUTO failed (no layers filled)"
 
     entry = round(sum(fills.values()) / len(fills), 2)
@@ -349,8 +590,12 @@ def open_for_signal(signal: Signal, source_id: str, raw: str) -> str:
         "tp_safety": tp_price,
         "tps": [float(t) for t in signal.tps],
         "open_ts": int(time.time()),
-        "be_done": False,
+        "tp1_closed": 0,
+        "tp1_sl_done": False,
         "tp1_done": False,
+        "tp2_closed": 0,
+        "tp2_done": False,
+        "pending_action": None,
         "done": False,
     }
     _save(state)
@@ -371,10 +616,11 @@ def open_for_signal(signal: Signal, source_id: str, raw: str) -> str:
         f"@ {entry:g} SL {sl_price:g} TP {tp_price:g} [tag {tag}]"
     )
     log.info(summary)
-    notify_admin(f"✅ {summary}")
+    _admin_notice(f"✅ {summary}")
     return summary
 
 
+@_state_locked
 def handle_followup(followup: FollowUpAlert, source_id: str, raw: str) -> str:
     """React to TP/SL/close-all follow-ups on trades THIS bot opened."""
     if not AUTOTRADE_ENABLED:
@@ -399,55 +645,58 @@ def handle_followup(followup: FollowUpAlert, source_id: str, raw: str) -> str:
     return _manage(state, key, trade, followup)
 
 
+@_state_locked
 def _manage(state: dict, key: str, trade: dict, followup: FollowUpAlert) -> str:
     symbol = trade.get("mt5_symbol") or trade["symbol"]
     action = followup.action
     level = int(getattr(followup, "level", 0) or 0)
-    layers = int(trade.get("layers") or 0)
-    volume0 = trade.get("volume0", 0)
 
-    closed_volume = 0.0
     reason = ""
     exit_label = "MAN"
 
     if action == "tp_hit":
-        if level == 1 and layers > 1 and not trade.get("tp1_done"):
-            target = max(1, layers // 2)
-            closed_volume, closed_layers = _close_target(symbol, target)
-            trade["tp1_done"] = True
-            reason = f"TP1: closed {closed_volume:g} of {volume0:g} ({closed_layers}/{layers} layers)"
-        elif level >= 2:
-            closed_volume = _close_all(symbol)
-            reason = f"TP{'2' if level == 2 else '3'}: closed {closed_volume:g}"
-            exit_label = f"TP{level}"
-            trade["done"] = True
+        if trade.get("done"):
+            reason = "AUTO: trade already closed"
+        elif trade.get("pending_action") and level < _terminal_level(trade):
+            reason = f"AUTO: waiting for {trade['pending_action']}"
         else:
-            reason = "TP1: single layer, holding to TP2"
+            reason = _release_stage(symbol, trade, level)
+        if trade.get("done"):
+            exit_label = trade.get("exit_price") or "MAN"
     elif action in ("sl_hit", "close_all", "setup_failed"):
-        closed_volume = _close_all(symbol)
-        if action == "setup_failed":
-            reason = f"setup invalid: closed {closed_volume:g}"
-            exit_label = "VOID"
+        if trade.get("done"):
+            reason = "AUTO: trade already closed"
         else:
-            reason = f"{action}: closed {closed_volume:g}"
-            exit_label = "SL" if action == "sl_hit" else "MAN"
-        trade["done"] = True
-
-    if closed_volume:
-        log.info("AUTOTRADE [%s]: %s", key, reason)
-        notify_admin(f"💰 AUTO {reason} — {symbol} [tag {trade['tag']}]")
+            closed_volume = _close_all(symbol)
+            if action == "setup_failed":
+                reason = f"setup invalid: closed {closed_volume:g}"
+                exit_label = "VOID"
+            else:
+                reason = f"{action}: closed {closed_volume:g}"
+                exit_label = "SL" if action == "sl_hit" else "MAN"
+            if _live_positions(symbol):
+                trade["pending_action"] = action
+                reason += "; close pending"
+            else:
+                trade["done"] = True
+                trade["exit_price"] = exit_label
+                trade.pop("pending_action", None)
+            if closed_volume:
+                log.info("AUTOTRADE [%s]: %s", key, reason)
+                _admin_notice(f"💰 AUTO {reason} — {symbol} [tag {trade['tag']}]")
+            else:
+                log.info("AUTOTRADE [%s]: %s", key, reason)
     else:
-        log.info("AUTOTRADE [%s]: %s", key, reason)
+        reason = f"unhandled followup: {action}"
+
     _save(state)
     _sync_db(state)
     if trade.get("done"):
-        mark_signal_exit(trade.get("tag") or key.split(":", 1)[-1], exit_label)
+        mark_signal_exit(
+            trade.get("tag") or key.split(":", 1)[-1],
+            trade.get("exit_price") or exit_label,
+        )
     return reason
-
-
-def _be_points_for(symbol: str) -> float:
-    si = mt5.symbol_info(symbol)
-    return BE_PIPS * symbol_pip(symbol, getattr(si, "digits", None))
 
 
 def _notify_tp_if_reached(trade: dict, tick) -> bool:
@@ -468,99 +717,67 @@ def _notify_tp_if_reached(trade: dict, tick) -> bool:
         if reached:
             trade[flag] = True
             changed = True
-            log.info("AUTOTRADE: TP%d reached %s %s (price %.2f)", index, symbol, trade["direction"], px)
-            notify_admin(
-                f"🎯 TP{index} reached — {symbol} {trade['direction'].upper()} "
-                f"price {px:.2f} vs TP{index} {level:g} [tag {trade['tag']}]"
+            label = "Exit" if index == 3 else f"TP{index}"
+            log.info("AUTOTRADE: %s reached %s %s (price %.2f)", label, symbol, trade["direction"], px)
+            _admin_notice(
+                f"🎯 {label} reached — {symbol} {trade['direction'].upper()} "
+                f"price {px:.2f} vs {label} {level:g} [tag {trade['tag']}]"
             )
     return changed
 
 
 def _close_at_price_targets(trade: dict, tick) -> bool:
-    """Close half the layers at TP1 and the rest at TP2+ when live price crosses.
-
-    Mirrors GEO's message-based management so targets are captured in real time
-    without waiting for the Telegram follow-up. Flag reuse (tp1_done / done)
-    prevents double-closing when both price and message fire for the same level.
-    """
-    if not PRICE_TP_CLOSE:
+    """Stage the scale-out as live price crosses each target, mirroring the
+    message-driven path (_manage -> _release_stage) so targets are captured in
+    real time. Flags (tp1_done / tp2_done / done) prevent double-processing
+    when price and message both fire for the same level."""
+    if not PRICE_TP_CLOSE or trade.get("done"):
         return False
     symbol = trade.get("mt5_symbol") or trade["symbol"]
     tps = trade.get("tps") or ([trade["tp_safety"]] if trade.get("tp_safety") else [])
     if not tps:
         return False
     direction = trade["direction"]
-    layers = int(trade.get("layers") or 0)
+    pending = trade.get("pending_action")
+    if pending:
+        terminal_level = _terminal_level(trade)
+        if pending in ("tp1", "tp2") and len(tps) >= terminal_level:
+            terminal_price = float(tps[terminal_level - 1])
+            if direction == "buy":
+                terminal_reached = float(tick[0]) >= terminal_price
+            else:
+                terminal_reached = float(tick[1]) <= terminal_price
+            if terminal_reached:
+                _release_stage(symbol, trade, terminal_level)
+                return True
+        return False
     changed = False
     for index, level in enumerate(tps, start=1):
-        if index == 1:
-            if trade.get("tp1_done"):
-                continue
-        else:
-            if trade.get("done"):
-                continue
+        if index == 1 and trade.get("tp1_done") and trade.get("tp1_sl_done"):
+            continue
+        if index == 2 and trade.get("tp2_done"):
+            continue
+        if trade.get("done"):
+            break
         if direction == "buy":
             reached = float(tick[0]) >= float(level)
         else:
             reached = float(tick[1]) <= float(level)
         if not reached:
             continue
-        if index == 1 and layers > 1:
-            target = max(1, layers // 2)
-            closed_volume, closed_layers = _close_target(symbol, target)
-            trade["tp1_done"] = True
-            reason = f"TP1: price closed {closed_volume:g} ({closed_layers}/{layers} layers)"
-        elif index >= 2:
-            closed_volume = _close_all(symbol)
-            trade["done"] = True
-            trade["exit_price"] = f"TP{index}"
-            reason = f"TP{index}: price closed {closed_volume:g}"
-        else:
-            trade["tp1_done"] = True
-            reason = "TP1: single layer, holding to TP2"
-        log.info("AUTOTRADE: price-triggered %s — %s", reason, symbol)
-        notify_admin(f"💰 AUTO {reason} — {symbol} [tag {trade['tag']}]")
+        _release_stage(symbol, trade, index)
         changed = True
+        if index == 1 and not trade.get("tp1_done"):
+            break
+        if index == 2 and not trade.get("tp2_done"):
+            break
     return changed
 
 
-def _apply_breakevens(trade: dict, tick, positions: list) -> None:
-    """Move each layer's SL to its fill once price is BE_PIPS in favour."""
-    symbol = trade.get("mt5_symbol") or trade["symbol"]
-    fills = _trade_fills(trade)
-    for pos in positions:
-        entry = fills.get(str(pos.ticket)) or trade.get("entry") or 0
-        if trade["direction"] == "buy":
-            hit = (tick[0] - entry) >= _be_points_for(symbol)
-        else:
-            hit = (entry - tick[1]) >= _be_points_for(symbol)
-        if not hit:
-            continue
-        request = {
-            "action": mt5.TRADE_ACTION_SLTP,
-            "symbol": symbol,
-            "position": pos.ticket,
-            "sl": entry,
-            "tp": float(pos.tp) if getattr(pos, "tp", None) else 0.0,
-            "magic": MAGIC,
-        }
-        result = mt5.order_send(request)
-        if result is not None and result.retcode == mt5.TRADE_RETCODE_DONE:
-            log.info("AUTOTRADE: breakeven set %s %s layer %s @ %g",
-                     symbol, trade["direction"], pos.ticket, entry)
-        else:
-            log.error("AUTOTRADE: SLTP modify failed retcode=%s",
-                      getattr(result, "retcode", "?"))
-    trade["be_done"] = True
-    notify_admin(
-        f"⚖️ AUTO breakeven set — {symbol} {trade['direction'].upper()} "
-        f"layers → fill {trade['entry']:g} [tag {trade['tag']}]"
-    )
-
-
+@_state_locked
 def _monitor_prices() -> None:
-    """Poll live trades: TP-arrival notifications, price-triggered TP closes
-    (+ breakeven if enabled)."""
+    """Poll live trades: TP-arrival notifications and price-triggered TP closes
+    (TP1-breakeven is applied inside the scale-out stages)."""
     if not AUTOTRADE_ENABLED or not _ready():
         return
     state = _state()
@@ -577,10 +794,35 @@ def _monitor_prices() -> None:
             changed = True
             mark_signal_exit(trade.get("tag") or key.split(":", 1)[-1], "EXT")
             continue
+        tp1_retry = (
+            trade.get("tp1_done") and not trade.get("tp1_sl_done")
+        ) or (
+            int(trade.get("tp1_closed") or 0) > 0
+            and not trade.get("tp1_done")
+        )
+        tp2_retry = (
+            int(trade.get("tp2_closed") or 0) > 0
+            and not trade.get("tp2_done")
+        )
+        retry_needed = bool(trade.get("pending_action")) or tp1_retry or tp2_retry
+        if retry_needed:
+            if trade.get("pending_action"):
+                _retry_pending_action(symbol, trade)
+            elif tp1_retry:
+                _release_stage(symbol, trade, 1)
+            else:
+                _release_stage(symbol, trade, 2)
+            changed = True
+        if trade.get("done"):
+            mark_signal_exit(
+                trade.get("tag") or key.split(":", 1)[-1],
+                trade.get("exit_price") or "MAN",
+            )
+            continue
         tick = _tick(symbol)
         if not tick:
             continue
-        if _notify_tp_if_reached(trade, tick):
+        if not trade.get("pending_action") and _notify_tp_if_reached(trade, tick):
             changed = True
         if _close_at_price_targets(trade, tick):
             changed = True
@@ -590,16 +832,13 @@ def _monitor_prices() -> None:
                 trade.get("exit_price") or "MAN",
             )
             continue
-        if BE_PIPS and BE_PIPS > 0 and not trade.get("be_done"):
-            _apply_breakevens(trade, _tick(symbol), _live_positions(symbol))
-            changed = True
     if changed:
         _save(state)
     _sync_db(state)
 
 
 async def run_manager_loop() -> None:
-    """Background task: poll positions for TP arrivals (+ breakevens)."""
+    """Background task: poll positions for TP arrivals and scale-out stages."""
     if not AUTOTRADE_ENABLED:
         return
     while True:

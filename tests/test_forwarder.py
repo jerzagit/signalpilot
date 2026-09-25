@@ -27,9 +27,10 @@ def test_signal_card_uses_requested_labels():
     card = build_signal_card(_signal(), "Geom V5")
     assert "Entry         :" in card
     assert "Stop Loss (SL):" in card
-    assert "Profit" in card
     assert "TP1" in card
     assert "TP2" in card
+    assert "Exit" in card
+    assert "Profit" not in card
     assert "Pm admin for auto-trade" in card
 
 
@@ -116,6 +117,8 @@ def test_followup_card_hides_provider_details():
     raw = "TP3 HIT\n\nSignal Tag: #011/20260924\n\nPair: XAUUSD.\nTimeFrame: M5\nServer Time: 2026.09.24 11:25\n\nLevel Pri\n"
     alert = FollowUpAlert(symbol="XAUUSD", direction="sell", action="tp_hit", raw_text=raw, level=3)
     card = build_followup_card(alert, raw_text=raw)
+    assert "Exit hit" in card
+    assert "TP3 hit" not in card
     for leaked in ("Signal Tag", "TimeFrame", "Server Time", "Level Pri", "GEO", "Pair:"):
         assert leaked not in card
     assert "⏱" in card

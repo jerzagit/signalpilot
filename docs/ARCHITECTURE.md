@@ -37,6 +37,12 @@ optional background news/trading tasks; the dashboard listens on
 | News | `core/news.py`, `core/rss_news.py` | Filtering, persistent deduplication, cached context, RSS polling |
 | Dashboard | `dashboard/app.py`, `dashboard/templates/`, `dashboard/static/` | Flask routes, Jinja templates, inline scripts and CSS |
 
+The dashboard uses a Flask/Jinja dark glass design system implemented in
+`portal.css` and `calendar.css`. `base.html` owns the responsive top navigation
+and persistent light/dark preference; page templates keep their existing data
+and interaction logic in vanilla JavaScript. The visual language is adapted from
+the local `lms-web-techpapa` reference without introducing React or Next.js.
+
 ## Runtime data
 
 Paths are relative to the process working directory; always start from the root.
@@ -79,11 +85,14 @@ Review this distinction before supporting colliding tags across providers.
 Position helpers filter by bot magic and symbol; do not assume every exit is
 isolated to a particular signal's tickets when multiple signals share a symbol.
 
-`PRICE_TP_CLOSE` enables price-triggered exits in addition to Telegram follow-ups.
-The manager also checks targets, applies breakeven, and synchronizes deals.
-The existing [trading guide](AUTOTRADE.md) is historical: its message-only exit
-description and account/balance examples are not authoritative current settings.
-Use the code and privately configured environment when checking behavior.
+`PRICE_TP_CLOSE` enables price-triggered scale-outs in addition to Telegram
+follow-ups. Both paths share `_release_stage()`; process-local locking serializes
+their state updates, while admin notifications run after the lock is released.
+Per-stage closed counts, pending actions, and completion flags make partial
+broker operations resumable and prevent normal message/price overlap from
+closing a stage twice. The manager anchors runner stops at TP1 and synchronizes
+broker deals. The [trading guide](AUTOTRADE.md) documents this behavior; private
+environment values and account details remain authoritative at runtime.
 
 Other follow-up items: duplicate `close_level` definitions in `core/db.py`;
 duplicated date-bound helpers in `dashboard/app.py`; full-suite test isolation

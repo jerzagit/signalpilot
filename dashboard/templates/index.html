@@ -6,40 +6,43 @@
 {% endblock %}
 
 {% block content %}
-<div class="page-header">
-  <h1>Calendar — {{ view.month_name }} <em>{{ view.year }}</em></h1>
-  <p>Account growth on top, realized profit per day below. Data comes from the
-  on-disk MT5 deal mirror — no terminal needed.</p>
+<div class="page-header animate-in">
+  <span class="eyebrow"><span class="eyebrow-dot"></span>Performance workspace</span>
+  <h1>Trading <em>performance</em></h1>
+  <p>Track account growth, daily results, and every released signal from one focused dashboard.</p>
 </div>
 
-<div class="card card-pad">
-  <div class="card-title">Account growth — balance after each closed day</div>
-  <div class="chart-box"><canvas id="growthChart"></canvas></div>
-</div>
-
-<div class="kpis kpis-compact">
+<div class="kpis kpis-compact animate-in delay-1">
   <div class="kpi-mini gold">
-    <span class="card-title">Balance</span>
-    <span class="card-value" id="kpi-balance">${{ "{:,.2f}".format(last_balance) }}</span>
+    <span class="kpi-icon">$</span>
+    <span class="kpi-copy"><span class="card-title">Balance</span><span class="card-value" id="kpi-balance">${{ "{:,.2f}".format(last_balance) }}</span></span>
   </div>
   <div class="kpi-mini">
-    <span class="card-title">Total</span>
-    <span class="card-value {% if total_pnl >= 0 %}text-success{% else %}text-danger{% endif %}" id="kpi-pnl">${{ "{:,.2f}".format(total_pnl) }}</span>
+    <span class="kpi-icon">Σ</span>
+    <span class="kpi-copy"><span class="card-title">Total realized</span><span class="card-value {% if total_pnl >= 0 %}text-success{% else %}text-danger{% endif %}" id="kpi-pnl">${{ "{:,.2f}".format(total_pnl) }}</span></span>
   </div>
   <div class="kpi-mini">
-    <span class="card-title">Month</span>
-    <span class="card-value {% if view.month_pnl >= 0 %}text-success{% else %}text-danger{% endif %}">${{ "{:,.2f}".format(view.month_pnl) }}</span>
+    <span class="kpi-icon">↗</span>
+    <span class="kpi-copy"><span class="card-title">This month</span><span class="card-value {% if view.month_pnl >= 0 %}text-success{% else %}text-danger{% endif %}">${{ "{:,.2f}".format(view.month_pnl) }}</span></span>
   </div>
   <div class="kpi-mini">
-    <span class="card-title">Win rate</span>
-    <span class="card-value">{{ "{:.1f}%".format(win_rate) }}</span>
+    <span class="kpi-icon">◎</span>
+    <span class="kpi-copy"><span class="card-title">Win rate</span><span class="card-value">{{ "{:.1f}%".format(win_rate) }}</span></span>
   </div>
 </div>
 
-<div class="card card-pad">
+<section class="card card-pad chart-card animate-in delay-2">
+  <div class="section-heading">
+    <div><span class="section-kicker">Equity curve</span><h2>Account growth</h2></div>
+    <span class="section-meta">After each closed day</span>
+  </div>
+  <div class="chart-box"><canvas id="growthChart"></canvas></div>
+</section>
+
+<section class="card card-pad calendar-card animate-in delay-3">
   <div class="cal-head">
     <a class="btn btn-secondary btn-sm" href="/?year={{ view.prev[0] }}&month={{ view.prev[1] }}">← {{ view.prev[1] | pycal_month_name }}</a>
-    <div class="cal-title">{{ view.month_name }} <em>{{ view.year }}</em></div>
+    <div class="cal-title"><span class="section-kicker">Trading calendar</span>{{ view.month_name }} <em>{{ view.year }}</em></div>
     <a class="btn btn-secondary btn-sm" href="/?year={{ view.next[0] }}&month={{ view.next[1] }}">{{ view.next[1] | pycal_month_name }} →</a>
   </div>
 
@@ -81,7 +84,7 @@
     <span><span class="dot pos"></span> positive day</span>
     <span><span class="dot neg"></span> negative day</span>
   </div>
-</div>
+</section>
 {% endblock %}
 
 {% block scripts %}
@@ -97,7 +100,7 @@
     }
     const ctx = document.getElementById('growthChart').getContext('2d');
     const g = ctx.createLinearGradient(0, 0, 0, 300);
-    g.addColorStop(0, 'rgba(212, 175, 55, 0.28)');
+    g.addColorStop(0, 'rgba(245, 197, 66, 0.30)');
     g.addColorStop(1, 'rgba(212, 175, 55, 0)');
     new Chart(ctx, {
       type: 'line',
@@ -106,12 +109,12 @@
         datasets: [{
           label: 'Balance',
           data: values,
-          borderColor: '#C9A227',
+          borderColor: '#F5C542',
           backgroundColor: g,
           fill: true,
           tension: .25,
           pointRadius: 2,
-          pointBackgroundColor: '#C9A227'
+          pointBackgroundColor: '#F5C542'
         }]
       },
       options: {
@@ -123,10 +126,10 @@
         },
         scales: {
           y: {
-            grid: { color: '#F1F2F4' },
-            ticks: { callback: v => '$' + v.toLocaleString() }
+            grid: { color: 'rgba(128,128,128,.14)' },
+            ticks: { color: '#858585', callback: v => '$' + v.toLocaleString() }
           },
-          x: { grid: { display: false } }
+          x: { grid: { display: false }, ticks: { color: '#858585' } }
         }
       }
     });
