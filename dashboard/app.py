@@ -37,6 +37,50 @@ def _mode() -> str:
     return "DEMO" if "demo" in server.lower() else "LIVE"
 
 
+def _iso_to_ts(d: str, day_end: bool = False) -> int:
+    """YYYY-MM-DD → unix at UTC-midnight; day_end=True → start of NEXT day
+    (exclusive upper bound, so `to` is inclusive in the trades view)."""
+    import time as sp_time
+    y, m, dd = [int(p) for p in d.split("-")[:3]]
+    base = sp_time.mktime((y, m, dd, 0, 0, 0, 0, 0, -1))
+    return int(base) + (86400 if day_end else 0)
+
+
+def _bounds(from_arg: str | None, to_arg: str | None) -> tuple[int | None, int | None]:
+    """from/to query params (YYYY-MM-DD or unix int) → (from_ts, to_ts_exclusive).
+
+    A single day `from=to=2026-09-10` yields [start-of-day, start-of-next-day)."""
+    def _parse(v: str | None, end: bool) -> int | None:
+        if not v:
+            return None
+        v = str(v).strip()
+        if v.isdigit():
+            return int(v) + (86400 if end else 0)
+        try:
+            return _iso_to_ts(v, day_end=end)
+        except (ValueError, IndexError):
+            return None
+    return _parse(from_arg, False), _parse(to_arg, True)
+
+
+def _day_window(from_iso: str | None, to_iso: str | None) -> tuple[int | None, int | None]:
+    """YYYY-MM-DD bounds → [from_ts, to_ts_exclusive) window.
+
+    A single day `from=to=2026-09-10` yields [start-of-day, start-of-next-day).
+    Returns (None, None) when no bounds are supplied (i.e. "all")."""
+    def _mk(v: str | None, end: bool) -> int | None:
+        if not v:
+            return None
+        v = str(v).strip()
+        if v.isdigit():
+            return int(v) + (86400 if end else 0)
+        try:
+            return _iso_to_ts(v, day_end=end)
+        except (ValueError, IndexError):
+            return None
+    return _mk(from_iso, False), _mk(to_iso, True)
+
+
 def _month_bounds(year: int, month: int):
     start = date(year, month, 1)
     end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
@@ -164,6 +208,9 @@ def trades_page():
         account=MT5_ACCOUNT or "—",
         autotrade=AUTOTRADE_ENABLED,
         total_pnl=db.stats()["pnl"],
+        filter_from=request.args.get("from") or "",
+        filter_to=request.args.get("to") or "",
+        today=date.today(),
     )
 
 
@@ -183,7 +230,8 @@ def api_trades():
 @app.route("/api/grouped")
 def api_grouped():
     limit = int(request.args.get("limit", "50"))
-    return jsonify(db.grouped_trades(limit))
+    f_ts, t_ts = _bounds(request.args.get("from"), request.args.get("to"))
+    return jsonify(db.grouped_trades(limit, from_ts=f_ts, to_ts=t_ts))
 
 
 @app.route("/api/stats")
@@ -203,5 +251,13 @@ def api_account():
 
 
 if __name__ == "__main__":
+    from core import singleton
+
+    if not singleton.acquire("dashboard"):
+        print("\nSignalPilot dashboard is already running. Only one instance allowed.")
+        sys.exit(1)
     print("SignalPilot dashboard on http://127.0.0.1:5001")
-    app.run(host="127.0.0.1", port=5001, debug=False)
+    try:
+        app.run(host="127.0.0.1", port=5001, debug=False)
+    finally:
+        singleton.release("dashboard")

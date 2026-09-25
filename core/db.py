@@ -203,8 +203,33 @@ def close_level(price: float, tps: list[float], sl: float | None, direction: str
     return "MAN"
 
 
-def grouped_trades(limit_groups: int = 50):
-    """Trades grouped by signal tag, with per-layer open/close detail rows."""
+def close_level(price: float, tps: list[float], sl: float | None, direction: str) -> str:
+    """Which exit a close price maps to: highest TP reached (with a small
+    touch-tolerance for market-close overshoot), SL, or MAN (manual/other)."""
+    price = float(price)
+    tol = 0.5  # price units a fill may overshoot the TP (XAUUSD ~5 pips)
+    reached = []
+    for i, tp in enumerate(tps or [], start=1):
+        if direction == "buy" and price >= float(tp) - tol:
+            reached.append(i)
+        elif direction == "sell" and price <= float(tp) + tol:
+            reached.append(i)
+    if reached:
+        return f"TP{max(reached)}"
+    if sl is not None:
+        if (direction == "buy" and price <= float(sl)) or (
+            direction == "sell" and price >= float(sl)
+        ):
+            return "SL"
+    return "MAN"
+
+
+def grouped_trades(limit_groups: int = 50, from_ts: int | None = None, to_ts: int | None = None):
+    """Trades grouped by signal tag, with per-layer open/close detail rows.
+
+    from_ts/to_ts (unix) restrict to signals received within that window (so a
+    "day on the calendar" shows exactly that day's signals).
+    """
     import time as _time
 
     with get_conn() as conn:
@@ -212,9 +237,28 @@ def grouped_trades(limit_groups: int = 50):
             r["signal_id"]: r
             for r in conn.execute("SELECT * FROM signals").fetchall()
         }
-        rows = conn.execute(
-            "SELECT * FROM trades WHERE tag != '' ORDER BY ts"
-        ).fetchall()
+        if from_ts is not None or to_ts is not None:
+            lo = int(from_ts) if from_ts is not None else 0
+            hi = int(to_ts) if to_ts is not None else 2**62
+            sigs = {
+                sid: s
+                for sid, s in sigs.items()
+                if lo <= (s["received_at"] or 0) < hi
+            }
+            allow_tags = set(sigs)
+        else:
+            allow_tags = None
+        if allow_tags is not None:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE tag != '' AND tag IN ({}) ORDER BY ts".format(
+                    ",".join("?" * len(allow_tags))
+                ),
+                sorted(allow_tags),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM trades WHERE tag != '' ORDER BY ts"
+            ).fetchall()
 
     groups: dict[str, dict] = {}
     for r in rows:

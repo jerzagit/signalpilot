@@ -1,7 +1,5 @@
 import asyncio
 import logging
-import os
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -16,12 +14,15 @@ load_dotenv()
 
 from core.config import RECONNECT_ATTEMPTS, RECONNECT_BACKOFF_SECS  # noqa: E402
 from core.listener import start_listener  # noqa: E402
+from core.singleton import acquire as singleton_acquire  # noqa: E402
+from core.singleton import release as singleton_release  # noqa: E402
 
 Path("logs").mkdir(exist_ok=True)
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s.%(msecs)03d [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.FileHandler("logs/bot.log", encoding="utf-8"),
         logging.StreamHandler(),
@@ -29,53 +30,18 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-PID_FILE = Path("data/bot.pid")
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        return str(pid) in result.stdout
-    except Exception:
-        return False
+APP_NAME = "bot"
 
 
 def acquire_lock() -> bool:
-    PID_FILE.parent.mkdir(exist_ok=True)
-    if PID_FILE.exists():
-        try:
-            old_pid = int(PID_FILE.read_text().strip())
-            if _pid_alive(old_pid):
-                print(f"\nSignalPilot is already running (PID {old_pid}).")
-                return False
-            print(f"\nStale lock file found (PID {old_pid}), replacing.")
-            PID_FILE.unlink()
-        except Exception:
-            try:
-                PID_FILE.unlink()
-            except Exception:
-                pass
-    try:
-        fd = os.open(str(PID_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        with os.fdopen(fd, "w") as f:
-            f.write(str(os.getpid()))
-        return True
-    except FileExistsError:
-        print(f"\nSignalPilot lock exists ({PID_FILE}).")
+    if not singleton_acquire(APP_NAME):
+        print("\nSignalPilot is already running. Only one bot instance allowed.")
         return False
+    return True
 
 
 def release_lock() -> None:
-    try:
-        if PID_FILE.exists():
-            PID_FILE.unlink()
-    except Exception as exc:
-        log.warning("Could not remove PID file: %s", exc)
+    singleton_release(APP_NAME)
 
 
 async def main_async() -> int:

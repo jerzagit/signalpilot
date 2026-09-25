@@ -14,6 +14,7 @@ core/grabshot.py. No full-screen capture ever happens.
 import asyncio
 import json
 import logging
+import time
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -53,6 +54,8 @@ from core.signal import attach_source_context, parse_followup_alert
 log = logging.getLogger(__name__)
 
 LAST_SIGNALS_FILE = Path("data/last_signals.json")
+
+_TRADE_LOCK = asyncio.Lock()
 
 
 def _load_last_signals() -> dict[str, dict]:
@@ -213,6 +216,17 @@ async def start_listener() -> None:
                 "Follow-up [%s]: %s symbol=%s direction=%s",
                 source.source_id, followup.action, followup.symbol, followup.direction,
             )
+            if AUTOTRADE_ENABLED:
+                async with _TRADE_LOCK:
+                    t0 = time.perf_counter()
+                    result = await asyncio.to_thread(
+                        autotrade_followup, followup, source.source_id, text
+                    )
+                if result:
+                    log.info(
+                        "Autotrade follow-up [%s]: %s (%.1fms)",
+                        source.source_id, result, (time.perf_counter() - t0) * 1000,
+                    )
             card = build_followup_card(followup, source.name, text)
             published = False
             if CHART_SHOT_ENABLED:
@@ -231,10 +245,6 @@ async def start_listener() -> None:
                     + (f"({followup.symbol})" if followup.symbol else "")
                     + (f" + chart" if published else ""),
                 )
-            if AUTOTRADE_ENABLED:
-                result = await asyncio.to_thread(autotrade_followup, followup, source.source_id, text)
-                if result:
-                    log.info("Autotrade follow-up [%s]: %s", source.source_id, result)
             return
 
         signal = parse_with_profile(source.parser_profile, text)
@@ -253,9 +263,16 @@ async def start_listener() -> None:
         _save_last_signals(last_signals)
 
         if AUTOTRADE_ENABLED:
-            result = await asyncio.to_thread(autotrade_open, signal, source.source_id, text)
+            async with _TRADE_LOCK:
+                t0 = time.perf_counter()
+                result = await asyncio.to_thread(
+                    autotrade_open, signal, source.source_id, text
+                )
             if result:
-                log.info("Autotrade open [%s]: %s", source.source_id, result)
+                log.info(
+                    "Autotrade open [%s]: %s (%.1fms)",
+                    source.source_id, result, (time.perf_counter() - t0) * 1000,
+                )
 
         headline_context = context_headlines() if (resolved_news or NEWS_RSS_QUERIES) else None
         card = build_signal_card(

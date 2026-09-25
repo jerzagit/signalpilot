@@ -15,6 +15,23 @@
   </div>
 </div>
 
+<div class="filter-bar">
+  <div class="filter-presets" id="date-presets">
+    <button type="button" class="btn-g {{ 'on' if not filter_from and not filter_to }}" data-range="all">All</button>
+    <button type="button" class="btn-g" data-range="today">Today</button>
+    <button type="button" class="btn-g" data-range="week">This week</button>
+    <button type="button" class="btn-g" data-range="month">This month</button>
+  </div>
+  <div class="filter-custom">
+    <label for="f-from">From</label>
+    <input type="date" id="f-from" value="{{ filter_from }}" max="{{ today.isoformat() }}">
+    <label for="f-to">To</label>
+    <input type="date" id="f-to" value="{{ filter_to }}" max="{{ today.isoformat() }}">
+    <button type="button" class="btn-g" id="apply-range">Apply range</button>
+    <span class="filter-hint" id="range-hint" role="status">Max range 3 months</span>
+  </div>
+</div>
+
 <div class="card">
   <div class="table-wrap">
     <table class="portal-table grouped">
@@ -39,16 +56,34 @@
 {% block scripts %}
 <script>
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const fmtTs = ts => new Date(ts * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+  const fmtTs = ts => ts == null ? '—' : new Date(ts * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
   const badge = label => {
     const cls = (label || '').toLowerCase().replace(/\d+$/, '').trim();
     const tone = label.startsWith('TP') ? 'tp' : (label === 'SL' ? 'sl' : (label === 'EXT' ? 'ext' : 'man'));
     return `<span class="badge ${tone}">${esc(label)}</span>`;
   };
 
-  fetch('/api/grouped?limit=50', { cache: 'no-cache' })
-    .then(r => r.json())
-    .then(groups => {
+  const params = new URLSearchParams(location.search);
+  const fromIso = params.get('from') || '';
+  const toIso = params.get('to') || '';
+  document.getElementById('f-from').value = fromIso;
+  document.getElementById('f-to').value = toIso;
+
+  const safe = d => {
+    if (!d) return null;
+    const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    return m ? m[1] + '-' + m[2] + '-' + m[3] : null;
+  };
+  const loadGroups = (f, t) => {
+    const q = new URLSearchParams({ limit: '50' });
+    if (f) q.set('from', f);
+    if (t) q.set('to', t);
+    fetch('/api/grouped?' + q, { cache: 'no-cache' })
+      .then(r => {
+        if (!r.ok) throw new Error('Unable to load trades');
+        return r.json();
+      })
+      .then(groups => {
       const body = document.getElementById('groups-body');
       if (!groups.length) {
         body.innerHTML = '<tr><td colspan="6" class="text-muted">No signals traded yet.</td></tr>';
@@ -69,7 +104,7 @@
           <tr class="group-row" data-g="${ri}">
             <td class="clear"><button class="toggle" aria-label="expand">▶</button></td>
             <td class="cell-tag"><span class="badge ${side === 'BUY' ? 'buy' : 'sell'}">${esc(g.tag)}</span>
-              <span class="muted mini">${fmtTs(g.opened_at)} · ${g.exit ? badge(g.exit) + ' ' : ''}${g.pnl > 0 ? '+' : ''}${Number(g.pnl).toFixed(2)}</span>
+              <span class="muted mini">${fmtTs(g.received_at ?? g.opened_at)} · ${g.exit ? badge(g.exit) + ' ' : ''}${g.pnl > 0 ? '+' : ''}${Number(g.pnl).toFixed(2)}</span>
             </td>
             <td><span class="side-badge ${side === 'BUY' ? 'buy' : 'sell'}">${side}</span></td>
             <td>${targets}</td>
@@ -108,6 +143,69 @@
         body.querySelectorAll(`tr.layer-row[data-g="${g}"]`).forEach(r => r.style.display = open ? '' : 'none');
         e.stopPropagation();
       }));
+    }).catch(() => {
+      document.getElementById('groups-body').innerHTML = '<tr><td colspan="6" class="text-danger">Unable to load trades. Please refresh to try again.</td></tr>';
     });
+  };
+
+  // Use the dashboard's calendar date, avoiding UTC conversion near midnight.
+  const todayIso = {{ today.isoformat() | tojson }};
+  const localDate = iso => new Date(iso + 'T00:00:00');
+  const isoDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const weekStart = localDate(todayIso);
+  weekStart.setDate(weekStart.getDate() - (weekStart.getDay() + 6) % 7);
+  const ranges = {
+    all: ['', ''],
+    today: [todayIso, todayIso],
+    week: [isoDate(weekStart), todayIso],
+    month: [todayIso.slice(0, 7) + '-01', todayIso],
+  };
+  const applyRange = (from, to) => {
+    const query = new URLSearchParams(location.search);
+    query.delete('from');
+    query.delete('to');
+    if (from) query.set('from', from);
+    if (to) query.set('to', to);
+    location.assign(location.pathname + (query.size ? '?' + query : ''));
+  };
+  document.querySelectorAll('#date-presets button').forEach(button => {
+    const [from, to] = ranges[button.dataset.range];
+    const active = fromIso === from && toIso === to;
+    button.classList.toggle('on', active);
+    button.setAttribute('aria-pressed', String(active));
+    button.addEventListener('click', () => applyRange(from, to));
+  });
+  const applyCustomRange = () => {
+    const fromInput = document.getElementById('f-from');
+    const toInput = document.getElementById('f-to');
+    const hint = document.getElementById('range-hint');
+    if (!fromInput.reportValidity() || !toInput.reportValidity()) return;
+    const from = safe(fromInput.value);
+    const to = safe(toInput.value);
+    if (from && to && from > to) {
+      hint.textContent = 'From date must be on or before To date.';
+      return;
+    }
+    if (from && to) {
+      const maxEnd = localDate(from);
+      const day = maxEnd.getDate();
+      maxEnd.setDate(1);
+      maxEnd.setMonth(maxEnd.getMonth() + 3);
+      const lastDay = new Date(maxEnd.getFullYear(), maxEnd.getMonth() + 1, 0).getDate();
+      maxEnd.setDate(Math.min(day, lastDay));
+      if (to > isoDate(maxEnd)) {
+        hint.textContent = 'Please select a range of 3 months or less.';
+        return;
+      }
+    }
+    applyRange(from, to);
+  };
+  document.getElementById('apply-range').addEventListener('click', applyCustomRange);
+  ['f-from', 'f-to'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', event => {
+      if (event.key === 'Enter') applyCustomRange();
+    });
+  });
+  loadGroups(safe(fromIso), safe(toIso));
 </script>
 {% endblock %}

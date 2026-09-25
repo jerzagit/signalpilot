@@ -77,6 +77,11 @@ AUTO_LOT_SIZE = float(os.getenv("AUTO_LOT_SIZE", "0.01"))
 PIP_SIZE = {k.strip(): float(v) for k, v in [
     pair.split("=") for pair in os.getenv("AUTO_PIP_SIZE", "XAUUSD=0.10").split(",") if "=" in pair
 ]}
+# Close layers automatically when price crosses GEO targets (TP1 = half the
+# layers, TP2/TP3 = the rest) instead of only reacting to Telegram follow-ups.
+PRICE_TP_CLOSE = os.getenv("PRICE_TP_CLOSE", "true").lower() in {
+    "1", "true", "yes", "on",
+}
 # Breakeven: move SL to entry after this many pips in favor.
 BE_PIPS = float(os.getenv("BE_PIPS", "50"))
 # How often (seconds) the breakeven price monitor polls live positions.

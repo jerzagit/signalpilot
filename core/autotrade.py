@@ -42,6 +42,7 @@ from core.config import (
     MT5_SYMBOL_MAP,
     MT5_TERMINAL_PATH,
     PIP_SIZE,
+    PRICE_TP_CLOSE,
     RISK_PERCENT,
 )
 from core.db import mark_signal_exit, record_signal, sync_from_mt5
@@ -422,10 +423,14 @@ def _manage(state: dict, key: str, trade: dict, followup: FollowUpAlert) -> str:
             trade["done"] = True
         else:
             reason = "TP1: single layer, holding to TP2"
-    elif action in ("sl_hit", "close_all"):
+    elif action in ("sl_hit", "close_all", "setup_failed"):
         closed_volume = _close_all(symbol)
-        reason = f"{action}: closed {closed_volume:g}"
-        exit_label = "SL" if action == "sl_hit" else "MAN"
+        if action == "setup_failed":
+            reason = f"setup invalid: closed {closed_volume:g}"
+            exit_label = "VOID"
+        else:
+            reason = f"{action}: closed {closed_volume:g}"
+            exit_label = "SL" if action == "sl_hit" else "MAN"
         trade["done"] = True
 
     if closed_volume:
@@ -471,6 +476,54 @@ def _notify_tp_if_reached(trade: dict, tick) -> bool:
     return changed
 
 
+def _close_at_price_targets(trade: dict, tick) -> bool:
+    """Close half the layers at TP1 and the rest at TP2+ when live price crosses.
+
+    Mirrors GEO's message-based management so targets are captured in real time
+    without waiting for the Telegram follow-up. Flag reuse (tp1_done / done)
+    prevents double-closing when both price and message fire for the same level.
+    """
+    if not PRICE_TP_CLOSE:
+        return False
+    symbol = trade.get("mt5_symbol") or trade["symbol"]
+    tps = trade.get("tps") or ([trade["tp_safety"]] if trade.get("tp_safety") else [])
+    if not tps:
+        return False
+    direction = trade["direction"]
+    layers = int(trade.get("layers") or 0)
+    changed = False
+    for index, level in enumerate(tps, start=1):
+        if index == 1:
+            if trade.get("tp1_done"):
+                continue
+        else:
+            if trade.get("done"):
+                continue
+        if direction == "buy":
+            reached = float(tick[0]) >= float(level)
+        else:
+            reached = float(tick[1]) <= float(level)
+        if not reached:
+            continue
+        if index == 1 and layers > 1:
+            target = max(1, layers // 2)
+            closed_volume, closed_layers = _close_target(symbol, target)
+            trade["tp1_done"] = True
+            reason = f"TP1: price closed {closed_volume:g} ({closed_layers}/{layers} layers)"
+        elif index >= 2:
+            closed_volume = _close_all(symbol)
+            trade["done"] = True
+            trade["exit_price"] = f"TP{index}"
+            reason = f"TP{index}: price closed {closed_volume:g}"
+        else:
+            trade["tp1_done"] = True
+            reason = "TP1: single layer, holding to TP2"
+        log.info("AUTOTRADE: price-triggered %s — %s", reason, symbol)
+        notify_admin(f"💰 AUTO {reason} — {symbol} [tag {trade['tag']}]")
+        changed = True
+    return changed
+
+
 def _apply_breakevens(trade: dict, tick, positions: list) -> None:
     """Move each layer's SL to its fill once price is BE_PIPS in favour."""
     symbol = trade.get("mt5_symbol") or trade["symbol"]
@@ -506,7 +559,8 @@ def _apply_breakevens(trade: dict, tick, positions: list) -> None:
 
 
 def _monitor_prices() -> None:
-    """Poll live trades: TP-arrival notifications (+ breakeven if enabled)."""
+    """Poll live trades: TP-arrival notifications, price-triggered TP closes
+    (+ breakeven if enabled)."""
     if not AUTOTRADE_ENABLED or not _ready():
         return
     state = _state()
@@ -528,8 +582,16 @@ def _monitor_prices() -> None:
             continue
         if _notify_tp_if_reached(trade, tick):
             changed = True
+        if _close_at_price_targets(trade, tick):
+            changed = True
+        if trade.get("done"):
+            mark_signal_exit(
+                trade.get("tag") or key.split(":", 1)[-1],
+                trade.get("exit_price") or "MAN",
+            )
+            continue
         if BE_PIPS and BE_PIPS > 0 and not trade.get("be_done"):
-            _apply_breakevens(trade, tick, positions)
+            _apply_breakevens(trade, _tick(symbol), _live_positions(symbol))
             changed = True
     if changed:
         _save(state)

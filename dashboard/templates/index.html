@@ -55,7 +55,11 @@
       {% else %}
         <div class="cal-cell {% if c.trading %}trading{% endif %}">
           <div class="cal-day">
-            {% if c.today %}<span class="cal-day today">{{ c.day }}</span>{% else %}<span>{{ c.day }}</span>{% endif %}
+            {% if c.iso %}
+              <a class="cal-day-link {{ 'today' if c.today }}" href="/trades?from={{ c.iso }}&amp;to={{ c.iso }}">{{ c.day }}</a>
+            {% else %}
+              {{ c.day }}
+            {% endif %}
             {% if c.balance is not none %}<span class="cal-pnl {% if c.pnl > 0 %}pos{% elif c.pnl < 0 %}neg{% else %}flat{% endif %}">{{ "%+.2f"|format(c.pnl) }}</span>{% endif %}
           </div>
           {% if c.balance is not none %}

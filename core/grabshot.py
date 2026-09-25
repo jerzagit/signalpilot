@@ -89,15 +89,6 @@ def _window_rect(hwnd: int) -> tuple[int, int, int, int]:
     return (rect.left, rect.top, rect.right, rect.bottom)
 
 
-def _bring_to_front(hwnd: int) -> None:
-    try:
-        _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        _user32.SetForegroundWindow(hwnd)
-        time.sleep(0.6)
-    except Exception:
-        log.debug("Could not bring MT5 window to front.", exc_info=True)
-
-
 def capture_chart(out_dir: str | Path = "data/screenshots") -> Path | None:
     """Capture the chart window and return the saved PNG path.
 
@@ -119,7 +110,6 @@ def capture_chart(out_dir: str | Path = "data/screenshots") -> Path | None:
         )
         return None
 
-    _bring_to_front(hwnd)
     bbox = _window_rect(hwnd)
     if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
         log.warning("Chart window rect is empty %s — skipping screenshot.", bbox)
